@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package with dev extras
+        run: python3 -m pip install --disable-pip-version-check -e ".[dev]"
+
+      - name: Lint
+        run: |
+          python3 -m ruff check .
+          python3 -m ruff format --check .
+
+      - name: Tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 -m pytest
