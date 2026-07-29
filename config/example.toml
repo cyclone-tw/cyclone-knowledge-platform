@@ -1,0 +1,27 @@
+# Example for config layer 1.
+#
+# Point the service at this file with CKP_CONFIG_FILE, then override
+# individual keys with CKP_<SECTION>_<KEY> environment variables. Layer order
+# is defaults -> this file -> environment, most specific last.
+#
+# Only keys that exist in src/ckp/defaults.toml are accepted. A key that is
+# not in the schema is an error, not a no-op -- a silently ignored override is
+# the config bug that costs the most to find.
+#
+# This file is an example and is not read automatically. Copy it somewhere
+# outside the repo before putting host-specific values in it: tracked source
+# must stay free of host paths (AGENTS.md §7).
+
+[profile]
+# Expected Cyclone Profile version. Used only when the bundle's own
+# bundle.toml does not declare one.
+expected_version = "cyclone-profile-v1"
+
+[bundle]
+# Relative paths resolve against the process working directory.
+root = "fixtures/synthetic-bundle"
+note_glob = "**/*.md"
+
+[server]
+host = "127.0.0.1"
+port = 8080

@@ -17,6 +17,15 @@ jobs:
   lint-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is the supported floor and what the container runs; 3.13+ is
+        # what a developer's machine is likely to have. They are not
+        # interchangeable: Path.glob raises from the call on 3.13+ and only
+        # from the iterator on 3.12, which hid a real config-validation bug
+        # that passed locally and failed here. Test both ends.
+        python-version: ["3.12", "3.14"]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -24,7 +33,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "${{ matrix.python-version }}"
 
       - name: Install package with dev extras
         run: python3 -m pip install --disable-pip-version-check -e ".[dev]"
@@ -38,3 +47,18 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python3 -m pytest
+
+  container:
+    # Contract Phase 8 wants a cold rebuild on a different host to be routine.
+    # Building from a clean checkout on a hosted runner is the cheapest
+    # standing proof that nothing in the package depends on a developer's box.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build image and smoke the endpoints
+        env:
+          BUNDLE_COMMIT: ${{ github.sha }}
+        run: bash scripts/smoke-container.sh
