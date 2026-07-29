@@ -156,6 +156,20 @@ def iter_note_paths(bundle_root: Path, note_glob: str) -> list[Path]:
     names can share one canonical form on a filesystem that preserves what it
     was given, and without a tie-break their order -- and so the digest --
     would inherit whatever order the glob returned.
+
+    One file, one entry. A pattern can reach the same file by more than one
+    lexical route -- ``**/../**/*.md`` yields both ``bundle/../bundle/sub/a.md``
+    and ``bundle/sub/../sub/a.md`` -- and each route would otherwise be hashed
+    separately, so the same note would count twice and the bundle would report
+    a different revision than the same bundle walked by a plainer pattern.
+
+    Deduplication keys on the **resolved path**, not on the canonical key.
+    Those are not the same thing: two byte-distinct filenames can normalise to
+    one canonical key while being genuinely different files, and collapsing
+    them would drop content from the digest.
+
+    Sorting happens before deduplication so that which duplicate survives does
+    not depend on the order the glob returned them in.
     """
     if not bundle_root.is_dir():
         return []
@@ -164,7 +178,18 @@ def iter_note_paths(bundle_root: Path, note_glob: str) -> list[Path]:
         for p in bundle_root.glob(note_glob)
         if (key := bundle_member_key(p, bundle_root)) is not None
     ]
-    return [p for _, _, p in sorted(keyed, key=lambda item: item[:2])]
+    notes: list[Path] = []
+    seen: set[Path] = set()
+    for _, _, path in sorted(keyed, key=lambda item: item[:2]):
+        try:
+            resolved = path.resolve()
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        notes.append(path)
+    return notes
 
 
 def compute_index_revision(bundle_root: Path, note_glob: str) -> str | None:

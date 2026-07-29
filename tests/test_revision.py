@@ -365,9 +365,12 @@ def test_names_sharing_a_canonical_form_still_order_deterministically(
         (root / f"{nfd}.md").write_bytes(b"two\n")
     except OSError:  # pragma: no cover - normalising filesystem
         pytest.skip("filesystem normalises filenames; both spellings collapse")
-    if len(iter_note_paths(root, GLOB)) < 2:  # pragma: no cover
+    # Ask the directory, not iter_note_paths: deciding the premise with the
+    # function under test lets a broken implementation skip instead of fail.
+    if len(os.listdir(root)) < 2:  # pragma: no cover - normalising filesystem
         pytest.skip("filesystem normalises filenames; both spellings collapse")
 
+    assert len(iter_note_paths(root, GLOB)) == 2
     assert compute_index_revision(root, GLOB) == compute_index_revision(root, GLOB)
     ordering = [p.name for p in iter_note_paths(root, GLOB)]
     assert ordering == sorted(ordering)
@@ -609,3 +612,54 @@ def test_a_directory_is_not_a_bundle_member(tmp_path) -> None:
     (root / "notadir.md").mkdir()
     assert bundle_member_key(root / "notadir.md", root) is None
     assert [p.name for p in iter_note_paths(root, GLOB)] == ["a.md"]
+
+
+# --- one file, one entry, however many routes reach it (Codex r4 #1) -------
+
+
+def test_a_pattern_reaching_one_file_twice_counts_it_once(tmp_path) -> None:
+    """`**/../**/*.md` finds bundle/../bundle/sub/a.md and bundle/sub/../sub/a.md.
+
+    Both resolve to the same note and key identically, so without dedup the
+    digest counted one note twice and disagreed with the same bundle walked by
+    a plainer pattern.
+    """
+    root = tmp_path / "bundle"
+    (root / "sub").mkdir(parents=True)
+    (root / "sub" / "a.md").write_bytes(b"alpha\n")
+
+    plain = compute_index_revision(root, "**/*.md")
+    assert len(iter_note_paths(root, "**/../**/*.md")) == 1
+    assert compute_index_revision(root, "**/../**/*.md") == plain
+    assert compute_index_revision(root, "*/../*/*.md") == plain
+
+
+def test_dedup_does_not_merge_distinct_files_sharing_a_canonical_key(
+    tmp_path,
+) -> None:
+    """Dedup keys on the resolved path, not on the canonical key.
+
+    Two byte-distinct filenames can normalise to one NFC key while being
+    different files; merging them would silently drop content from the digest.
+    """
+    import unicodedata
+
+    nfc = unicodedata.normalize("NFC", "café")
+    nfd = unicodedata.normalize("NFD", nfc)
+    root = tmp_path / "both"
+    root.mkdir()
+    (root / f"{nfc}.md").write_bytes(b"one\n")
+    try:
+        (root / f"{nfd}.md").write_bytes(b"two\n")
+    except OSError:  # pragma: no cover - normalising filesystem
+        pytest.skip("filesystem normalises filenames; both spellings collapse")
+    # The premise comes from the directory, not from iter_note_paths. Asking
+    # the function under test whether its own precondition holds is how a
+    # dedup bug turns into a skip instead of a failure -- which is exactly
+    # what this assertion caught when it was written the other way round.
+    if len(os.listdir(root)) < 2:  # pragma: no cover - normalising filesystem
+        pytest.skip("filesystem normalises filenames; both spellings collapse")
+
+    notes = iter_note_paths(root, GLOB)
+    assert len(notes) == 2
+    assert {p.read_bytes() for p in notes} == {b"one\n", b"two\n"}
