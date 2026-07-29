@@ -24,8 +24,8 @@ private editable copy of the other's contract.
 
 ## Status
 
-Phase 3 bootstrap. See issue #1 (platform Epic) for the child map, dependency
-order and file ownership.
+Phase 3 walking skeleton (child C1). See issue #1 (platform Epic) for the
+child map, dependency order and file ownership.
 
 ## Quick start
 
@@ -33,15 +33,56 @@ order and file ownership.
 python3 -m pip install -e ".[dev]"
 python3 -m pytest
 python3 -m ruff check .
+
+python3 -m ckp                       # serve on 127.0.0.1:8080
+curl -s localhost:8080/health
+curl -s localhost:8080/revision
 ```
+
+Container, including the endpoint smoke test:
+
+```bash
+bash scripts/smoke-container.sh
+```
+
+## Revision reporting
+
+`/revision` answers "what exactly is this process serving", with the four
+fields the OKF contract requires — and names the evidence behind each one, so
+a derived value and a self-declared one stay distinguishable.
+
+| Field | Source | Falls back to |
+| --- | --- | --- |
+| `profile_version` | the bundle's `bundle.toml` | config `profile.expected_version`, then `null` |
+| `api_version` | `ckp.revision.API_VERSION` — also the published schema version | — |
+| `bundle_commit` | `git rev-parse HEAD` in the bundle | a build-time `.bundle-commit` stamp, then `null` |
+| `index_revision` | sha256 over the bundle's note paths and bytes | `null` when the bundle is unreadable |
+
+Two properties are load-bearing rather than cosmetic. `index_revision` is
+**derived**: same bundle, same digest, on any host — contract §5.5 makes a
+non-reproducible rebuild a rollback trigger. And nothing is **fabricated**:
+absent evidence reports as `null`, because a placeholder would make a broken
+deployment look identical to a healthy one.
+
+## Configuration
+
+Three layers, most specific last:
+
+1. `src/ckp/defaults.toml` — shipped in the package, and the key schema.
+2. an optional TOML file, via `CKP_CONFIG_FILE` (see `config/example.toml`).
+3. environment variables, `CKP_<SECTION>_<KEY>` — e.g. `CKP_BUNDLE_ROOT`.
+
+An override naming a key the schema does not define is an **error**, not a
+no-op. `/health` reports which layers actually contributed.
 
 ## Layout
 
 ```
-src/ckp/          service package (added by the walking skeleton child)
-tests/            pytest suite
-config/           layered configuration defaults
+src/ckp/          service package
+config/           example for the file config layer
 fixtures/         synthetic bundles — never real Wiki content
+scripts/          container smoke test
+tests/            pytest suite
 ```
 
 ## Related

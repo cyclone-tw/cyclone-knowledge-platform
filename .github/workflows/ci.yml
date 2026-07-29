@@ -38,3 +38,18 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python3 -m pytest
+
+  container:
+    # Contract Phase 8 wants a cold rebuild on a different host to be routine.
+    # Building from a clean checkout on a hosted runner is the cheapest
+    # standing proof that nothing in the package depends on a developer's box.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build image and smoke the endpoints
+        env:
+          BUNDLE_COMMIT: ${{ github.sha }}
+        run: bash scripts/smoke-container.sh

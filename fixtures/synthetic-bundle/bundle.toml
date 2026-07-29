@@ -1,0 +1,10 @@
+# Descriptor for the synthetic bundle.
+#
+# Self-declared evidence: the platform reports this value and names its source
+# as "bundle-descriptor". It does not verify the claim -- verification against
+# the actual notes is C3's job, not the skeleton's.
+#
+# Everything under this directory is synthetic. No Cyclone-Wiki content is
+# vendored into this repo (AGENTS.md §1).
+
+profile_version = "cyclone-profile-v1"

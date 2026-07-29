@@ -1,0 +1,24 @@
+# Layer 0 of the config stack: built-in defaults.
+#
+# This file also defines the *key schema*. A config file or environment
+# variable naming a key that is absent here is rejected (ckp.config fails
+# closed) -- a typo in an override must be loud, not silently ignored.
+#
+# Values here are deliberately host-agnostic. Anything host-specific arrives
+# through a config file or the environment (AGENTS.md §7).
+
+[profile]
+# The Cyclone Profile version this deployment expects the bundle to conform
+# to. Empty means "no expectation declared" -- the bundle's own descriptor is
+# then the only source, and an undeclared bundle reports null.
+expected_version = ""
+
+[bundle]
+# Relative paths resolve against the process working directory. The container
+# sets WORKDIR so the default works there too.
+root = "fixtures/synthetic-bundle"
+note_glob = "**/*.md"
+
+[server]
+host = "127.0.0.1"
+port = 8080

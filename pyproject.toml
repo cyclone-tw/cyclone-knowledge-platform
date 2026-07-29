@@ -7,16 +7,27 @@ name = "cyclone-knowledge-platform"
 version = "0.1.0"
 description = "Private Knowledge Platform for the Cyclone-Wiki OKF migration"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+  # The Gateway (Epic #1 / C3) will serve from this same app, so the skeleton
+  # uses the real framework rather than a stand-in that would be replaced.
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
   "ruff>=0.6",
+  "httpx>=0.27",  # required by fastapi.testclient.TestClient
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# defaults.toml is layer 0 of the config stack and the key schema; it must
+# ship inside the wheel, not sit beside the source tree.
+ckp = ["*.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
