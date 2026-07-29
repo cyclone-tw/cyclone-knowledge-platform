@@ -10,6 +10,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from ckp.config import load_config
 from ckp.revision import (
     API_VERSION,
@@ -243,3 +245,75 @@ def test_revision_dict_carries_exactly_the_contract_fields() -> None:
         "index_revision",
         "sources",
     }
+
+
+# --- stamp reading: undecodable or exotic input is not evidence -------------
+
+
+def test_binary_stamp_is_not_evidence(tmp_path) -> None:
+    """UnicodeDecodeError is a ValueError, so an OSError-only guard misses it."""
+    root = _bundle(tmp_path / "b", {"a.md": b"alpha\n"})
+    (root / ".bundle-commit").write_bytes(b"\xff\xfe\x00binary")
+    assert resolve_bundle_commit(root) == (None, "unknown")
+
+
+def test_stamp_takes_the_first_newline_delimited_line(tmp_path) -> None:
+    root = _bundle(tmp_path / "b", {"a.md": b"alpha\n"})
+    (root / ".bundle-commit").write_text("abc123\ntrailing junk\n", encoding="utf-8")
+    assert resolve_bundle_commit(root) == ("abc123", "stamp")
+
+
+def test_stamp_does_not_split_on_exotic_line_separators(tmp_path) -> None:
+    """str.splitlines() breaks on U+2028; `head -n 1` does not, and neither do we.
+
+    Silently truncating at a separator the writer never intended would report a
+    commit that was never stamped.
+    """
+    root = _bundle(tmp_path / "b", {"a.md": b"alpha\n"})
+    (root / ".bundle-commit").write_text("abc def\n", encoding="utf-8")
+    commit, source = resolve_bundle_commit(root)
+    assert (commit, source) == ("abc def", "stamp")
+
+
+# --- unicode normalisation: one logical name, one digest --------------------
+
+
+def test_digest_is_stable_across_unicode_normalisation_forms(tmp_path) -> None:
+    """macOS stores NFD, ext4 stores what it was given; the digest must not care.
+
+    Without normalisation the same logical bundle digests differently on the
+    two hosts, and contract §5.5 calls a non-reproducible rebuild a rollback
+    trigger.
+    """
+    import unicodedata
+
+    nfc = unicodedata.normalize("NFC", "café")
+    nfd = unicodedata.normalize("NFD", nfc)
+    assert nfc != nfd
+
+    a = _bundle(tmp_path / "nfc", {f"{nfc}.md": b"same content\n"})
+    b = _bundle(tmp_path / "nfd", {f"{nfd}.md": b"same content\n"})
+    assert compute_index_revision(a, GLOB) == compute_index_revision(b, GLOB)
+
+
+def test_names_sharing_a_canonical_form_still_order_deterministically(
+    tmp_path,
+) -> None:
+    """Both spellings can coexist on a byte-preserving filesystem."""
+    import unicodedata
+
+    nfc = unicodedata.normalize("NFC", "café")
+    nfd = unicodedata.normalize("NFD", nfc)
+    root = tmp_path / "both"
+    root.mkdir()
+    (root / f"{nfc}.md").write_bytes(b"one\n")
+    try:
+        (root / f"{nfd}.md").write_bytes(b"two\n")
+    except OSError:  # pragma: no cover - normalising filesystem
+        pytest.skip("filesystem normalises filenames; both spellings collapse")
+    if len(iter_note_paths(root, GLOB)) < 2:  # pragma: no cover
+        pytest.skip("filesystem normalises filenames; both spellings collapse")
+
+    assert compute_index_revision(root, GLOB) == compute_index_revision(root, GLOB)
+    ordering = [p.name for p in iter_note_paths(root, GLOB)]
+    assert ordering == sorted(ordering)

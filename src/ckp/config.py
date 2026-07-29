@@ -44,6 +44,27 @@ def _env_name(section: str, key: str) -> str:
     return f"{ENV_PREFIX}{section.upper()}_{key.upper()}"
 
 
+def _expand_path(value: str, where: str) -> Path:
+    """Turn a configured path string into a Path, or raise ``ConfigError``.
+
+    Both failure modes here escape as something other than ``OSError``, so
+    neither is caught by the ordinary read guards downstream:
+
+    * a null byte only fails at the syscall, arbitrarily far from here;
+    * ``expanduser`` on an unknown ``~user`` raises ``RuntimeError``.
+
+    Resolving every configured path through this function at load time means a
+    bad path fails closed while the process is still starting, instead of
+    surfacing later as a 500 from a request handler.
+    """
+    if "\x00" in value:
+        raise ConfigError(f"{where}: path contains a null byte")
+    try:
+        return Path(value).expanduser()
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise ConfigError(f"{where}: cannot resolve path {value!r}: {exc}") from exc
+
+
 def _coerce(value: str, template: Any, where: str) -> Any:
     """Coerce a string override to the type its default declares.
 
@@ -68,7 +89,9 @@ def _merge_file(
 ) -> None:
     try:
         raw = path.read_bytes()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError as well as OSError: a path the filesystem layer rejects
+        # outright (an embedded null byte, say) raises the former.
         raise ConfigError(f"config file {path} is not readable: {exc}") from exc
     try:
         parsed = tomllib.loads(raw.decode("utf-8"))
@@ -133,16 +156,15 @@ class Config:
 
     values: Mapping[str, Mapping[str, Any]]
     layers: tuple[str, ...]
+    #: Resolved once at load time rather than on each access, so a path the
+    #: system cannot expand is a startup failure and not a 500 mid-request.
+    bundle_root: Path
 
     def get(self, section: str, key: str) -> Any:
         try:
             return self.values[section][key]
         except KeyError as exc:
             raise ConfigError(f"no such config key {section}.{key}") from exc
-
-    @property
-    def bundle_root(self) -> Path:
-        return Path(self.get("bundle", "root")).expanduser()
 
     @property
     def bundle_note_glob(self) -> str:
@@ -174,7 +196,7 @@ def load_config(
 
     chosen = config_file if config_file is not None else env.get("CKP_CONFIG_FILE")
     if chosen:
-        path = Path(chosen).expanduser()
+        path = _expand_path(str(chosen), "CKP_CONFIG_FILE")
         _merge_file(merged, defaults, path)
         layers.append(f"file:{path}")
 
@@ -182,4 +204,8 @@ def load_config(
         layers.append("env")
 
     frozen = {section: dict(entries) for section, entries in merged.items()}
-    return Config(values=frozen, layers=tuple(layers))
+    return Config(
+        values=frozen,
+        layers=tuple(layers),
+        bundle_root=_expand_path(frozen["bundle"]["root"], "bundle.root"),
+    )

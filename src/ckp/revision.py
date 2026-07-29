@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import subprocess
 import tomllib
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -74,7 +75,7 @@ def read_bundle_descriptor(bundle_root: Path) -> dict[str, Any]:
     path = bundle_root / BUNDLE_DESCRIPTOR
     try:
         raw = path.read_bytes()
-    except OSError:
+    except (OSError, ValueError):
         return {}
     try:
         return tomllib.loads(raw.decode("utf-8"))
@@ -82,16 +83,40 @@ def read_bundle_descriptor(bundle_root: Path) -> dict[str, Any]:
         return {}
 
 
+def _canonical_relpath(path: Path, bundle_root: Path) -> str:
+    """The bundle-relative path in the one form every host agrees on.
+
+    Filenames carrying combining characters are stored differently by
+    different filesystems -- macOS leans NFD, ext4 preserves whatever bytes it
+    was handed -- so ``café.md`` checked out on two machines can be two byte
+    sequences for one logical name. Keying the digest on the raw string would
+    make ``index_revision`` host-dependent, and contract §5.5 treats a rebuild
+    that cannot be reproduced as a rollback trigger. NFC is the canonical form
+    to compare in.
+    """
+    return unicodedata.normalize("NFC", path.relative_to(bundle_root).as_posix())
+
+
 def iter_note_paths(bundle_root: Path, note_glob: str) -> list[Path]:
     """Every note in the bundle, in a deterministic order.
 
-    Sorted by POSIX-normalised relative path so the digest does not depend on
-    filesystem walk order, which differs between machines.
+    Sorted by the canonical relative path so the digest depends on neither
+    filesystem walk order nor the host's unicode normalisation habits.
     """
     if not bundle_root.is_dir():
         return []
     notes = [p for p in bundle_root.glob(note_glob) if p.is_file()]
-    return sorted(notes, key=lambda p: p.relative_to(bundle_root).as_posix())
+    # Two byte-distinct names can share one canonical form on a filesystem
+    # that preserves what it was given. Tie-break on the raw path so the order
+    # -- and therefore the digest -- stays deterministic instead of inheriting
+    # whatever order the glob happened to return.
+    return sorted(
+        notes,
+        key=lambda p: (
+            _canonical_relpath(p, bundle_root),
+            p.relative_to(bundle_root).as_posix(),
+        ),
+    )
 
 
 def compute_index_revision(bundle_root: Path, note_glob: str) -> str | None:
@@ -112,9 +137,9 @@ def compute_index_revision(bundle_root: Path, note_glob: str) -> str | None:
     for path in iter_note_paths(bundle_root, note_glob):
         try:
             content = path.read_bytes()
-        except OSError:
+        except (OSError, ValueError):
             return None
-        rel = path.relative_to(bundle_root).as_posix()
+        rel = _canonical_relpath(path, bundle_root)
         digest.update(rel.encode("utf-8"))
         digest.update(b"\0")
         digest.update(hashlib.sha256(content).hexdigest().encode("ascii"))
@@ -141,7 +166,7 @@ def _git_commit(bundle_root: Path) -> str | None:
             timeout=_GIT_TIMEOUT_SECONDS,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
         return None
@@ -150,11 +175,24 @@ def _git_commit(bundle_root: Path) -> str | None:
 
 
 def _stamped_commit(bundle_root: Path) -> str | None:
+    """Read the deploy stamp. Unreadable or undecodable means no evidence.
+
+    ``read_text`` would raise ``UnicodeDecodeError`` on a binary stamp, which
+    is a ``ValueError`` and so slips past an ``OSError``-only guard; the bytes
+    are decoded explicitly instead.
+    """
     try:
-        stamp = (bundle_root / BUNDLE_COMMIT_STAMP).read_text(encoding="utf-8")
-    except OSError:
+        raw = (bundle_root / BUNDLE_COMMIT_STAMP).read_bytes()
+    except (OSError, ValueError):
         return None
-    commit = stamp.strip()
+    try:
+        stamp = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    # split("\n") rather than splitlines(): the latter also breaks on U+2028
+    # and friends, so a stamp containing one would silently yield a truncated
+    # commit instead of being rejected.
+    commit = stamp.split("\n", 1)[0].strip()
     return commit or None
 
 

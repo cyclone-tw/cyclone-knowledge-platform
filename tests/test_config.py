@@ -117,3 +117,46 @@ def test_empty_expected_profile_version_reads_as_unset() -> None:
     assert load_config(env={}).profile_expected_version is None
     config = load_config(env={"CKP_PROFILE_EXPECTED_VERSION": "cyclone-profile-v1"})
     assert config.profile_expected_version == "cyclone-profile-v1"
+
+
+# --- paths that only fail outside OSError (Codex r1 findings 1-2, plus the
+# --- same root cause at the bundle-root read point)
+
+
+def test_config_file_with_a_null_byte_raises_config_error() -> None:
+    """A null byte only fails at the syscall, far from where it was accepted."""
+    with pytest.raises(ConfigError, match="null byte"):
+        load_config(config_file="\x00bad", env={})
+
+
+def test_config_file_with_an_unknown_user_home_raises_config_error() -> None:
+    """``expanduser`` raises RuntimeError here, which no OSError guard catches."""
+    with pytest.raises(ConfigError, match="cannot resolve path"):
+        load_config(config_file="~definitely-no-such-user-ckp/f.toml", env={})
+
+
+def test_bad_bundle_root_fails_at_startup_not_at_request_time() -> None:
+    """The worst shape of this bug: config loads, then a request 500s.
+
+    Resolving bundle.root during load means the process refuses to start
+    instead of serving a broken /health.
+    """
+    with pytest.raises(ConfigError, match="bundle.root"):
+        load_config(env={"CKP_BUNDLE_ROOT": "~definitely-no-such-user-ckp/bundle"})
+    with pytest.raises(ConfigError, match="null byte"):
+        load_config(env={"CKP_BUNDLE_ROOT": "bad\x00root"})
+
+
+def test_bundle_root_is_expanded_once_at_load_time(tmp_path) -> None:
+    config = load_config(env={"CKP_BUNDLE_ROOT": str(tmp_path)})
+    assert config.bundle_root == tmp_path
+    # The resolved Path is what callers use; the raw string stays inspectable.
+    assert config.get("bundle", "root") == str(tmp_path)
+
+
+def test_home_relative_bundle_root_expands() -> None:
+    from pathlib import Path
+
+    config = load_config(env={"CKP_BUNDLE_ROOT": "~/ckp-bundle"})
+    assert config.bundle_root == Path.home() / "ckp-bundle"
+    assert "~" not in str(config.bundle_root)
