@@ -7,6 +7,7 @@ reproducibility has to be a property that fails loudly, not a hope.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from ckp.revision import (
     bundle_is_readable,
     compute_index_revision,
     iter_note_paths,
+    read_bundle_descriptor,
     resolve_bundle_commit,
     resolve_profile_version,
 )
@@ -317,3 +319,80 @@ def test_names_sharing_a_canonical_form_still_order_deterministically(
     assert compute_index_revision(root, GLOB) == compute_index_revision(root, GLOB)
     ordering = [p.name for p in iter_note_paths(root, GLOB)]
     assert ordering == sorted(ordering)
+
+
+# --- health must reflect what serving actually requires (Codex r1 #1) -------
+
+
+def test_unreadable_note_makes_the_bundle_unreadable(tmp_path) -> None:
+    """The inconsistency this closes: listable but not readable.
+
+    `is_file()` passes on a note whose permissions deny reading, so a
+    list-only check reported the bundle healthy while index_revision was null.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - root ignores the mode bits
+        pytest.skip("running as root; permission bits do not apply")
+
+    root = _bundle(tmp_path / "b", {"a.md": b"alpha\n"})
+    os.chmod(root / "a.md", 0o000)
+    try:
+        assert compute_index_revision(root, GLOB) is None
+        assert bundle_is_readable(root, GLOB) is False
+    finally:
+        os.chmod(root / "a.md", 0o644)
+
+    assert bundle_is_readable(root, GLOB) is True
+
+
+# --- symlinks may not carry the digest outside the bundle (Codex r1 #2) ----
+
+
+def test_note_symlinked_out_of_the_bundle_is_excluded(tmp_path) -> None:
+    """Otherwise the revision depends on state the bundle does not contain."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "external.md").write_bytes(b"not part of the bundle\n")
+
+    root = _bundle(tmp_path / "b", {"a.md": b"alpha\n"})
+    alone = compute_index_revision(root, GLOB)
+
+    (root / "external.md").symlink_to(outside / "external.md")
+    assert [p.name for p in iter_note_paths(root, GLOB)] == ["a.md"]
+    assert compute_index_revision(root, GLOB) == alone
+
+
+def test_symlink_inside_the_bundle_is_kept(tmp_path) -> None:
+    """Both ends travel with the commit, so it stays reproducible."""
+    root = _bundle(tmp_path / "b", {"real/a.md": b"alpha\n"})
+    (root / "alias.md").symlink_to(root / "real" / "a.md")
+    names = [p.relative_to(root).as_posix() for p in iter_note_paths(root, GLOB)]
+    assert names == ["alias.md", "real/a.md"]
+
+
+def test_bundle_root_may_itself_be_a_symlink(tmp_path) -> None:
+    """Mounting a checkout at a stable path is normal and must keep working."""
+    real = _bundle(tmp_path / "real", {"a.md": b"alpha\n"})
+    link = tmp_path / "mounted"
+    link.symlink_to(real, target_is_directory=True)
+    assert compute_index_revision(link, GLOB) == compute_index_revision(real, GLOB)
+    assert bundle_is_readable(link, GLOB) is True
+
+
+def test_descriptor_symlinked_out_of_the_bundle_is_ignored(tmp_path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "bundle.toml").write_text(
+        'profile_version = "smuggled"\n', encoding="utf-8"
+    )
+    root = _bundle(tmp_path / "b", {"a.md": b"alpha\n"})
+    (root / "bundle.toml").symlink_to(outside / "bundle.toml")
+    assert read_bundle_descriptor(root) == {}
+
+
+def test_stamp_symlinked_out_of_the_bundle_is_ignored(tmp_path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / ".bundle-commit").write_text("smuggled\n", encoding="utf-8")
+    root = _bundle(tmp_path / "b", {"a.md": b"alpha\n"})
+    (root / ".bundle-commit").symlink_to(outside / ".bundle-commit")
+    assert resolve_bundle_commit(root) == (None, "unknown")

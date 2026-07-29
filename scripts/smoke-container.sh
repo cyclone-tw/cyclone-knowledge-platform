@@ -48,10 +48,26 @@ revision="$(curl -fsS "http://127.0.0.1:$PORT/revision")"
 echo "==> health:   $health"
 echo "==> revision: $revision"
 
-BUNDLE_COMMIT="$BUNDLE_COMMIT" python3 - "$health" "$revision" <<'PY'
+# Compute the fixture digest here, on the host, from the source tree. That is
+# what makes the comparison below mean something: "starts with sha256:" would
+# accept any digest at all, while this fails unless the container serves the
+# very value this checkout computes. Only stdlib is needed, so no install step.
+expected_index="$(PYTHONPATH=src python3 -c '
+from pathlib import Path
+from ckp.revision import compute_index_revision
+print(compute_index_revision(Path("fixtures/synthetic-bundle"), "**/*.md"))
+')"
+
+BUNDLE_COMMIT="$BUNDLE_COMMIT" EXPECTED_INDEX="$expected_index" \
+  python3 - "$health" "$revision" <<'PY'
 import json
 import os
 import sys
+
+# Written out rather than imported from ckp.revision: an oracle that reads the
+# value it is checking agrees with any value, including a wrong one.
+EXPECTED_API_VERSION = "0.1"
+EXPECTED_PROFILE_VERSION = "cyclone-profile-v1"
 
 health = json.loads(sys.argv[1])
 revision = json.loads(sys.argv[2])
@@ -66,14 +82,36 @@ for field in ("profile_version", "api_version", "bundle_commit", "index_revision
     if field not in revision:
         failures.append(f"contract field {field} missing from /revision")
 
-if not revision.get("api_version"):
-    failures.append("api_version is empty")
-if revision.get("profile_version") != "cyclone-profile-v1":
+if revision.get("api_version") != EXPECTED_API_VERSION:
+    failures.append(
+        f"api_version is {revision.get('api_version')!r}, "
+        f"expected {EXPECTED_API_VERSION!r}"
+    )
+if revision.get("profile_version") != EXPECTED_PROFILE_VERSION:
     failures.append(f"unexpected profile_version {revision.get('profile_version')!r}")
-if revision.get("sources", {}).get("profile_version") != "bundle-descriptor":
-    failures.append("profile_version did not come from the bundle descriptor")
-if not str(revision.get("index_revision") or "").startswith("sha256:"):
-    failures.append(f"index_revision is not a digest: {revision.get('index_revision')!r}")
+
+expected_index = os.environ.get("EXPECTED_INDEX", "").strip()
+if not expected_index or not expected_index.startswith("sha256:"):
+    failures.append(f"host-side digest did not compute: {expected_index!r}")
+elif revision.get("index_revision") != expected_index:
+    # The whole portability claim in one assertion: the container and the host
+    # must derive the same revision from the same bundle.
+    failures.append(
+        f"index_revision is {revision.get('index_revision')!r}, "
+        f"but this checkout computes {expected_index!r}"
+    )
+
+sources = revision.get("sources", {})
+for field, expected_source in (
+    ("profile_version", "bundle-descriptor"),
+    ("api_version", "code"),
+    ("index_revision", "computed"),
+):
+    if sources.get(field) != expected_source:
+        failures.append(
+            f"sources[{field}] is {sources.get(field)!r}, "
+            f"expected {expected_source!r}"
+        )
 
 expected_commit = os.environ.get("BUNDLE_COMMIT", "").strip()
 if expected_commit:

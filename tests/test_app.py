@@ -7,6 +7,8 @@ config, and the reported revision must change with it.
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -17,6 +19,11 @@ from conftest import REPO_ROOT
 
 FIXTURE_BUNDLE = REPO_ROOT / "fixtures" / "synthetic-bundle"
 CONTRACT_FIELDS = ("profile_version", "api_version", "bundle_commit", "index_revision")
+
+#: Written out rather than imported. Asserting against ``API_VERSION`` only
+#: proves the app and the constant agree, so any wrong value would agree with
+#: itself and pass. Changing the contract version must mean changing this line.
+EXPECTED_API_VERSION = "0.1"
 
 
 @pytest.fixture
@@ -69,6 +76,8 @@ def test_api_version_has_a_single_source(client: TestClient) -> None:
     schema_version = client.get("/openapi.json").json()["info"]["version"]
     endpoint_version = client.get("/revision").json()["api_version"]
     assert app_version == schema_version == endpoint_version == API_VERSION
+    # ...and all of them must equal the version this test states independently.
+    assert API_VERSION == EXPECTED_API_VERSION
 
 
 def test_index_revision_matches_the_locally_computed_digest(client: TestClient) -> None:
@@ -104,3 +113,85 @@ def test_config_override_reaches_the_endpoint(tmp_path) -> None:
     assert overridden_body["index_revision"] == compute_index_revision(
         alternate, "**/*.md"
     )
+
+
+# --- oracles that a wrong implementation could previously satisfy ----------
+
+
+def test_bundle_commit_equals_the_repositorys_head(client: TestClient) -> None:
+    """Truthiness is not an assertion: pin the value against git directly."""
+    head = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if head.returncode != 0:  # pragma: no cover - source export without git
+        pytest.skip("not a git checkout")
+
+    body = client.get("/revision").json()
+    assert body["bundle_commit"] == head.stdout.strip()
+    assert body["sources"]["bundle_commit"] == "git"
+
+
+def test_sources_track_the_bundle_rather_than_being_constant(tmp_path) -> None:
+    """A handler hardcoding sources would pass the fixture-only assertions."""
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    (bare / "only.md").write_bytes(b"no descriptor, no stamp, no git\n")
+
+    body = (
+        TestClient(create_app(load_config(env={"CKP_BUNDLE_ROOT": str(bare)})))
+        .get("/revision")
+        .json()
+    )
+
+    assert body["profile_version"] is None
+    assert body["bundle_commit"] is None
+    assert body["sources"] == {
+        "profile_version": "unknown",
+        "api_version": "code",
+        "bundle_commit": "unknown",
+        "index_revision": "computed",
+    }
+
+
+def test_revision_is_recomputed_per_request(tmp_path) -> None:
+    """Caching the digest at startup would serve a stale revision forever."""
+    bundle = tmp_path / "live"
+    bundle.mkdir()
+    (bundle / "a.md").write_bytes(b"first\n")
+
+    client = TestClient(create_app(load_config(env={"CKP_BUNDLE_ROOT": str(bundle)})))
+    before = client.get("/revision").json()["index_revision"]
+
+    (bundle / "a.md").write_bytes(b"second\n")
+    after = client.get("/revision").json()["index_revision"]
+
+    assert before != after
+    assert after == compute_index_revision(bundle, "**/*.md")
+
+
+def test_health_is_degraded_when_a_note_cannot_be_read(tmp_path) -> None:
+    """End to end for the listable-but-unreadable case."""
+    import os
+
+    if os.geteuid() == 0:  # pragma: no cover - root ignores the mode bits
+        pytest.skip("running as root; permission bits do not apply")
+
+    bundle = tmp_path / "locked"
+    bundle.mkdir()
+    note = bundle / "a.md"
+    note.write_bytes(b"alpha\n")
+    os.chmod(note, 0o000)
+    try:
+        client = TestClient(
+            create_app(load_config(env={"CKP_BUNDLE_ROOT": str(bundle)}))
+        )
+        health = client.get("/health")
+        revision = client.get("/revision").json()
+        assert health.status_code == 503
+        assert health.json()["checks"]["bundle_readable"] is False
+        assert revision["index_revision"] is None
+    finally:
+        os.chmod(note, 0o644)

@@ -65,6 +65,24 @@ def _expand_path(value: str, where: str) -> Path:
         raise ConfigError(f"{where}: cannot resolve path {value!r}: {exc}") from exc
 
 
+def _validate_glob(pattern: str, where: str) -> str:
+    """Reject a glob the path layer will refuse, while we can still say why.
+
+    Same shape as the path problem above and it needs the same treatment: an
+    empty pattern raises ``ValueError`` and an absolute one raises
+    ``NotImplementedError``, both from ``Path.glob`` itself rather than from
+    iterating it. Left unvalidated they are accepted at startup and surface as
+    a 500 from whichever request first walks the bundle.
+    """
+    if not pattern.strip():
+        raise ConfigError(f"{where}: pattern is empty")
+    try:
+        Path(".").glob(pattern)
+    except (ValueError, NotImplementedError, OSError) as exc:
+        raise ConfigError(f"{where}: unusable pattern {pattern!r}: {exc}") from exc
+    return pattern
+
+
 def _coerce(value: str, template: Any, where: str) -> Any:
     """Coerce a string override to the type its default declares.
 
@@ -204,6 +222,10 @@ def load_config(
         layers.append("env")
 
     frozen = {section: dict(entries) for section, entries in merged.items()}
+    # Everything the bundle layer will hand to the filesystem is validated here,
+    # while ConfigError is still the contract. Anything left unchecked at this
+    # boundary becomes a request-time 500 instead of a refusal to start.
+    _validate_glob(frozen["bundle"]["note_glob"], "bundle.note_glob")
     return Config(
         values=frozen,
         layers=tuple(layers),

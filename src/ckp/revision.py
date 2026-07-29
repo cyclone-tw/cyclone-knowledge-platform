@@ -66,6 +66,27 @@ class Revision:
         }
 
 
+def _within_bundle(path: Path, bundle_root: Path) -> bool:
+    """Does this path resolve to somewhere inside the bundle?
+
+    A symlink pointing out of the bundle makes the reported revision depend on
+    state the bundle does not contain: two hosts at the same commit would
+    digest differently, which contract §5.5 treats as a rollback trigger. It is
+    also a way for content that was never part of the bundle to be served as
+    if it were.
+
+    The bundle root may itself be a symlink -- mounting a checkout at a stable
+    path is normal -- so both sides are resolved before comparing. Symlinks
+    that stay inside the bundle are fine: both ends travel with the commit.
+    """
+    try:
+        resolved_root = bundle_root.resolve()
+        resolved = path.resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return resolved_root in resolved.parents
+
+
 def read_bundle_descriptor(bundle_root: Path) -> dict[str, Any]:
     """Parse ``bundle.toml``. A missing or malformed descriptor is not fatal.
 
@@ -73,6 +94,8 @@ def read_bundle_descriptor(bundle_root: Path) -> dict[str, Any]:
     required. Callers see an empty mapping and fall back to reporting unknown.
     """
     path = bundle_root / BUNDLE_DESCRIPTOR
+    if not _within_bundle(path, bundle_root):
+        return {}
     try:
         raw = path.read_bytes()
     except (OSError, ValueError):
@@ -105,7 +128,11 @@ def iter_note_paths(bundle_root: Path, note_glob: str) -> list[Path]:
     """
     if not bundle_root.is_dir():
         return []
-    notes = [p for p in bundle_root.glob(note_glob) if p.is_file()]
+    notes = [
+        p
+        for p in bundle_root.glob(note_glob)
+        if p.is_file() and _within_bundle(p, bundle_root)
+    ]
     # Two byte-distinct names can share one canonical form on a filesystem
     # that preserves what it was given. Tie-break on the raw path so the order
     # -- and therefore the digest -- stays deterministic instead of inheriting
@@ -181,8 +208,11 @@ def _stamped_commit(bundle_root: Path) -> str | None:
     is a ``ValueError`` and so slips past an ``OSError``-only guard; the bytes
     are decoded explicitly instead.
     """
+    stamp_path = bundle_root / BUNDLE_COMMIT_STAMP
+    if not _within_bundle(stamp_path, bundle_root):
+        return None
     try:
-        raw = (bundle_root / BUNDLE_COMMIT_STAMP).read_bytes()
+        raw = stamp_path.read_bytes()
     except (OSError, ValueError):
         return None
     try:
@@ -246,8 +276,22 @@ def build_revision(config: Config) -> Revision:
 
 
 def bundle_is_readable(bundle_root: Path, note_glob: str) -> bool:
-    """A bundle is readable when the directory exists and yields at least one note."""
-    return bool(iter_note_paths(bundle_root, note_glob))
+    """Can this bundle actually be served?
+
+    Listing the notes is not enough. A note that exists but cannot be read --
+    wrong ownership after a volume mount, say -- passes ``is_file`` and then
+    makes ``index_revision`` null, so /health would report ok while /revision
+    reported nothing. Health answers the question by doing the same work
+    /revision does, which makes the two consistent by construction rather than
+    by two implementations agreeing.
+
+    That means /health digests the bundle. Acceptable at skeleton scale and
+    with a synthetic bundle; the Gateway child (Epic #1 / C3) is where a cached
+    revision with explicit invalidation belongs.
+    """
+    if not iter_note_paths(bundle_root, note_glob):
+        return False
+    return compute_index_revision(bundle_root, note_glob) is not None
 
 
 __all__ = [

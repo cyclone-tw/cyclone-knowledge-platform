@@ -160,3 +160,29 @@ def test_home_relative_bundle_root_expands() -> None:
     config = load_config(env={"CKP_BUNDLE_ROOT": "~/ckp-bundle"})
     assert config.bundle_root == Path.home() / "ckp-bundle"
     assert "~" not in str(config.bundle_root)
+
+
+# --- the same class as the path bug, one level up: a value the path layer
+# --- will reject must be rejected here, not at request time (Codex r1 #3)
+
+
+def test_empty_note_glob_is_rejected_at_load() -> None:
+    """Path.glob("") raises ValueError from the call itself, not on iteration."""
+    with pytest.raises(ConfigError, match="pattern is empty"):
+        load_config(env={"CKP_BUNDLE_NOTE_GLOB": ""})
+
+
+def test_whitespace_note_glob_is_rejected_at_load() -> None:
+    with pytest.raises(ConfigError, match="pattern is empty"):
+        load_config(env={"CKP_BUNDLE_NOTE_GLOB": "   "})
+
+
+def test_absolute_note_glob_is_rejected_at_load() -> None:
+    """Path.glob raises NotImplementedError for a non-relative pattern."""
+    with pytest.raises(ConfigError, match="unusable pattern"):
+        load_config(env={"CKP_BUNDLE_NOTE_GLOB": "/etc/*.md"})
+
+
+def test_usable_note_glob_survives_validation() -> None:
+    config = load_config(env={"CKP_BUNDLE_NOTE_GLOB": "notes/**/*.md"})
+    assert config.bundle_note_glob == "notes/**/*.md"
