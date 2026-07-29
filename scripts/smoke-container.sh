@@ -136,3 +136,55 @@ if failures:
     sys.exit(1)
 print("smoke: container revision reporting looks right")
 PY
+
+# Privacy gate smoke (Epic #1 / C2): prove the module ships in the image and
+# behaves on the deployment interpreter, not just in the dev venv. Notes are
+# synthesised inside the container -- no tracked fixture Markdown carries a
+# non-public class (tests/test_no_wiki_content.py stays at full strength).
+echo "==> privacy gate smoke"
+docker run --rm -i --entrypoint python "$IMAGE" - <<'PY'
+import sys
+import tempfile
+from pathlib import Path
+
+from ckp.privacy import (
+    Admitted,
+    FrontmatterClassifier,
+    PrivacyClass,
+    PrivacyGate,
+    Refused,
+)
+from ckp.privacy.gate import REASON_STUDENT_PRIVATE_SINK
+
+gate = PrivacyGate(
+    FrontmatterClassifier(),
+    frozenset({PrivacyClass.PUBLIC, PrivacyClass.INTERNAL}),
+)
+failures = []
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    ok = root / "ok.md"
+    ok.write_bytes(b"---\nprivacy: public\n---\n\n# synthetic\n")
+    undetermined = root / "undetermined.md"
+    undetermined.write_bytes(b"---\ntitle: no declaration\n---\n\n# synthetic\n")
+    student = root / "student.md"
+    student.write_bytes(
+        b"---\nprivacy: student-private\n---\n\n"
+        b"# SYNTHETIC FIXTURE, invented student Zaphod Example-Student\n"
+    )
+
+    if not isinstance(gate.admit(ok), Admitted):
+        failures.append("a public note was not admitted")
+    verdict = gate.admit(undetermined)
+    if not isinstance(verdict, Refused):
+        failures.append("an undetermined note passed the gate")
+    verdict = gate.admit(student)
+    if not isinstance(verdict, Refused) or verdict.reason != REASON_STUDENT_PRIVATE_SINK:
+        failures.append("student-private was not refused with its dedicated code")
+
+if failures:
+    for line in failures:
+        print(f"smoke: {line}", file=sys.stderr)
+    sys.exit(1)
+print("smoke: privacy gate refuses what it must on the deployment interpreter")
+PY
