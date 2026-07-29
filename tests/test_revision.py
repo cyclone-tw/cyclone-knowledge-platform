@@ -38,6 +38,33 @@ def _bundle(root: Path, files: dict[str, bytes]) -> Path:
     return root
 
 
+def _git_available() -> bool:
+    try:
+        return (
+            subprocess.run(
+                ["git", "--version"], capture_output=True, check=False
+            ).returncode
+            == 0
+        )
+    except OSError:
+        return False
+
+
+#: Skip rather than fail where git is absent. A source export or a slim image
+#: has no repository to ask, and "no evidence" is the documented answer there,
+#: not a defect. CI has git, so these still run where it matters.
+requires_git = pytest.mark.skipif(not _git_available(), reason="git not available")
+
+#: Stricter, and the precise premise for anything asserting that the *shipped*
+#: fixture reports a commit: the git binary existing is not the same as this
+#: checkout being resolvable. A source export, or a worktree whose .git file
+#: points somewhere unmounted, has the binary and still no commit.
+requires_bundle_commit = pytest.mark.skipif(
+    resolve_bundle_commit(FIXTURE_BUNDLE)[0] is None,
+    reason="fixture bundle has no resolvable commit here",
+)
+
+
 def _git_repo(root: Path) -> str:
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     common = [
@@ -121,11 +148,32 @@ def test_digest_is_none_when_the_bundle_is_absent(tmp_path) -> None:
     assert compute_index_revision(tmp_path / "nope", GLOB) is None
 
 
-def test_empty_bundle_digests_but_is_not_readable(tmp_path) -> None:
+def test_empty_bundle_has_no_revision_at_all(tmp_path) -> None:
+    """An empty bundle is not "the digest of an empty set".
+
+    This test previously asserted the opposite -- a digest plus an unreadable
+    bundle -- which pinned the exact contradiction it should have caught:
+    /health said 503 while /revision handed back a revision.
+    """
     root = tmp_path / "empty"
     root.mkdir()
-    assert compute_index_revision(root, GLOB) is not None
+    assert compute_index_revision(root, GLOB) is None
     assert bundle_is_readable(root, GLOB) is False
+
+
+def test_health_and_revision_never_disagree(tmp_path) -> None:
+    """One computation answers both, so walk the states and check they track."""
+    root = tmp_path / "b"
+    root.mkdir()
+    assert (compute_index_revision(root, GLOB) is None) is (
+        not bundle_is_readable(root, GLOB)
+    )
+    (root / "a.md").write_bytes(b"alpha\n")
+    assert (compute_index_revision(root, GLOB) is not None) is bundle_is_readable(
+        root, GLOB
+    )
+    assert compute_index_revision(tmp_path / "gone", GLOB) is None
+    assert bundle_is_readable(tmp_path / "gone", GLOB) is False
 
 
 def test_note_paths_are_sorted_by_posix_relative_path(tmp_path) -> None:
@@ -141,6 +189,7 @@ def test_note_paths_are_sorted_by_posix_relative_path(tmp_path) -> None:
 # --- bundle_commit: evidence, never invention -------------------------------
 
 
+@requires_git
 def test_commit_comes_from_git_when_the_bundle_is_a_work_tree(tmp_path) -> None:
     root = _bundle(tmp_path / "b", {"a.md": b"alpha\n"})
     head = _git_repo(root)
@@ -154,6 +203,7 @@ def test_commit_falls_back_to_the_stamp_without_git(tmp_path) -> None:
     assert resolve_bundle_commit(root) == ("abc123", "stamp")
 
 
+@requires_git
 def test_live_git_wins_over_a_stale_stamp(tmp_path) -> None:
     root = _bundle(tmp_path / "b", {"a.md": b"alpha\n"})
     (root / ".bundle-commit").write_text("stale000\n", encoding="utf-8")
@@ -206,6 +256,7 @@ def test_malformed_descriptor_does_not_crash_the_service(tmp_path) -> None:
 # --- build_revision over the real fixture bundle ----------------------------
 
 
+@requires_bundle_commit
 def test_revision_over_the_shipped_fixture_bundle() -> None:
     config = load_config(env={"CKP_BUNDLE_ROOT": str(FIXTURE_BUNDLE)})
     revision = build_revision(config)
@@ -361,12 +412,16 @@ def test_note_symlinked_out_of_the_bundle_is_excluded(tmp_path) -> None:
     assert compute_index_revision(root, GLOB) == alone
 
 
-def test_symlink_inside_the_bundle_is_kept(tmp_path) -> None:
-    """Both ends travel with the commit, so it stays reproducible."""
+def test_symlink_inside_the_bundle_is_also_refused(tmp_path) -> None:
+    """Allowing any symlink leaves a swap window between the check and the read.
+
+    An in-bundle link is harmless in principle, but it is worth nothing here
+    and permitting the category is what creates the window.
+    """
     root = _bundle(tmp_path / "b", {"real/a.md": b"alpha\n"})
     (root / "alias.md").symlink_to(root / "real" / "a.md")
     names = [p.relative_to(root).as_posix() for p in iter_note_paths(root, GLOB)]
-    assert names == ["alias.md", "real/a.md"]
+    assert names == ["real/a.md"]
 
 
 def test_bundle_root_may_itself_be_a_symlink(tmp_path) -> None:
@@ -396,3 +451,95 @@ def test_stamp_symlinked_out_of_the_bundle_is_ignored(tmp_path) -> None:
     root = _bundle(tmp_path / "b", {"a.md": b"alpha\n"})
     (root / ".bundle-commit").symlink_to(outside / ".bundle-commit")
     assert resolve_bundle_commit(root) == (None, "unknown")
+
+
+# --- the digest key must not depend on how the glob reached the note --------
+
+
+def test_digest_key_ignores_the_route_the_glob_took(tmp_path) -> None:
+    """`../bundle/a.md` and `a.md` are one note and must digest identically.
+
+    relative_to() is purely lexical, so a pattern reaching a note by way of
+    `..` used to key it under a path that leaves the bundle in the string even
+    though it resolves inside. Same content, two revisions.
+    """
+    root = _bundle(tmp_path / "bundle", {"a.md": b"alpha\n"})
+    direct = compute_index_revision(root, "**/*.md")
+    roundabout = compute_index_revision(root, "../**/*.md")
+    assert direct is not None
+    assert roundabout == direct
+
+
+# --- a golden digest, computed outside the implementation ------------------
+
+#: The digest of the shipped fixture bundle, pinned as a literal. Every other
+#: digest assertion compares compute_index_revision() against itself, so
+#: swapping sha256 for sha1 while keeping the "sha256:" prefix would satisfy
+#: all of them. This one would not.
+GOLDEN_FIXTURE_DIGEST = (
+    "sha256:754d8514119194d5cb3dbb906ac852282e2e318f3aeae2d5ca5dcd490280509d"
+)
+
+
+def test_shipped_fixture_matches_the_golden_digest() -> None:
+    assert compute_index_revision(FIXTURE_BUNDLE, GLOB) == GOLDEN_FIXTURE_DIGEST
+
+
+def test_golden_digest_is_reproducible_from_the_documented_algorithm(
+    tmp_path,
+) -> None:
+    """Re-derive the digest here, without calling the module under test.
+
+    If this and compute_index_revision ever disagree, one of them changed the
+    algorithm; the point is that changing it cannot go unnoticed.
+    """
+    import hashlib
+
+    outer = hashlib.sha256()
+    outer.update(b"ckp-index-v1\n")
+    for rel in sorted(
+        p.relative_to(FIXTURE_BUNDLE).as_posix()
+        for p in FIXTURE_BUNDLE.rglob("*.md")
+        if p.is_file()
+    ):
+        outer.update(rel.encode("utf-8"))
+        outer.update(b"\0")
+        outer.update(
+            hashlib.sha256((FIXTURE_BUNDLE / rel).read_bytes())
+            .hexdigest()
+            .encode("ascii")
+        )
+        outer.update(b"\n")
+    assert f"sha256:{outer.hexdigest()}" == GOLDEN_FIXTURE_DIGEST
+
+
+# --- descriptor values that are not versions -------------------------------
+
+
+@pytest.mark.parametrize(
+    "declared",
+    ["profile_version = 42", "profile_version = true", 'profile_version = ""'],
+)
+def test_non_string_or_empty_descriptor_version_is_not_a_declaration(
+    tmp_path, declared: str
+) -> None:
+    """`if declared:` instead of an isinstance check would report 42 as a version."""
+    root = _bundle(tmp_path / "b", {"a.md": b"alpha\n"})
+    (root / "bundle.toml").write_text(declared + "\n", encoding="utf-8")
+    assert resolve_profile_version(root, load_config(env={})) == (None, "unknown")
+
+
+def test_whitespace_descriptor_version_falls_back_to_config(tmp_path) -> None:
+    root = _bundle(tmp_path / "b", {"a.md": b"alpha\n"})
+    (root / "bundle.toml").write_text('profile_version = "   "\n', encoding="utf-8")
+    config = load_config(env={"CKP_PROFILE_EXPECTED_VERSION": "from-config"})
+    assert resolve_profile_version(root, config) == ("from-config", "config")
+
+
+def test_declared_version_is_stripped(tmp_path) -> None:
+    root = _bundle(tmp_path / "b", {"a.md": b"alpha\n"})
+    (root / "bundle.toml").write_text('profile_version = " v9 "\n', encoding="utf-8")
+    assert resolve_profile_version(root, load_config(env={})) == (
+        "v9",
+        "bundle-descriptor",
+    )

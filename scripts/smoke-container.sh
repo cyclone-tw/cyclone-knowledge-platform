@@ -48,15 +48,13 @@ revision="$(curl -fsS "http://127.0.0.1:$PORT/revision")"
 echo "==> health:   $health"
 echo "==> revision: $revision"
 
-# Compute the fixture digest here, on the host, from the source tree. That is
-# what makes the comparison below mean something: "starts with sha256:" would
-# accept any digest at all, while this fails unless the container serves the
-# very value this checkout computes. Only stdlib is needed, so no install step.
-expected_index="$(PYTHONPATH=src python3 -c '
-from pathlib import Path
-from ckp.revision import compute_index_revision
-print(compute_index_revision(Path("fixtures/synthetic-bundle"), "**/*.md"))
-')"
+# The fixture digest, written out rather than computed by the code under test.
+# Deriving it here with ckp.revision would make the oracle agree with any
+# algorithm the implementation happened to use -- swap sha256 for sha1, keep
+# the prefix, and both sides would move together. Kept in step with
+# GOLDEN_FIXTURE_DIGEST in tests/test_revision.py, which fails if the fixture
+# or the algorithm changes.
+expected_index="sha256:754d8514119194d5cb3dbb906ac852282e2e318f3aeae2d5ca5dcd490280509d"
 
 BUNDLE_COMMIT="$BUNDLE_COMMIT" EXPECTED_INDEX="$expected_index" \
   python3 - "$health" "$revision" <<'PY'

@@ -17,6 +17,7 @@ layering that cannot be observed cannot be tested.
 from __future__ import annotations
 
 import os
+import tempfile
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -70,14 +71,22 @@ def _validate_glob(pattern: str, where: str) -> str:
 
     Same shape as the path problem above and it needs the same treatment: an
     empty pattern raises ``ValueError`` and an absolute one raises
-    ``NotImplementedError``, both from ``Path.glob`` itself rather than from
-    iterating it. Left unvalidated they are accepted at startup and surface as
-    a 500 from whichever request first walks the bundle.
+    ``NotImplementedError``. Left unvalidated they are accepted at startup and
+    surface as a 500 from whichever request first walks the bundle.
+
+    **The iterator must be consumed.** On Python 3.12 -- the floor this project
+    supports, and what the container runs -- ``Path.glob`` builds a lazy
+    iterator and raises only when it is advanced; on 3.13+ it raises from the
+    call. Validating without consuming therefore passes on a newer interpreter
+    and lets the bug straight through on the supported one, which is exactly
+    what happened here. The walk runs against an empty temporary directory so
+    consuming it costs nothing and cannot depend on the working directory.
     """
     if not pattern.strip():
         raise ConfigError(f"{where}: pattern is empty")
     try:
-        Path(".").glob(pattern)
+        with tempfile.TemporaryDirectory() as probe:
+            next(Path(probe).glob(pattern), None)
     except (ValueError, NotImplementedError, OSError) as exc:
         raise ConfigError(f"{where}: unusable pattern {pattern!r}: {exc}") from exc
     return pattern

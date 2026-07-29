@@ -66,25 +66,49 @@ class Revision:
         }
 
 
-def _within_bundle(path: Path, bundle_root: Path) -> bool:
-    """Does this path resolve to somewhere inside the bundle?
+def bundle_member_key(path: Path, bundle_root: Path) -> str | None:
+    """The digest key for a bundle member, or None if it is not one.
 
-    A symlink pointing out of the bundle makes the reported revision depend on
-    state the bundle does not contain: two hosts at the same commit would
-    digest differently, which contract §5.5 treats as a rollback trigger. It is
-    also a way for content that was never part of the bundle to be served as
-    if it were.
+    One function answers both questions -- is this path part of the bundle,
+    and what does the digest call it -- because answering them separately is
+    how they drift apart.
 
-    The bundle root may itself be a symlink -- mounting a checkout at a stable
-    path is normal -- so both sides are resolved before comparing. Symlinks
-    that stay inside the bundle are fine: both ends travel with the commit.
+    A member must satisfy three things:
+
+    * **Not a symlink.** A link out of the bundle would make the reported
+      revision depend on state the bundle does not contain, so two hosts at
+      one commit could disagree; contract §5.5 calls that a rollback trigger.
+      Links that stay inside are harmless in principle, but allowing any
+      symlink means the check and the later read can disagree if the link is
+      swapped in between, and their value here is nil. Refused outright.
+    * **Inside the bundle once resolved.** The root itself may be a symlink --
+      mounting a checkout at a stable path is normal -- so both sides are
+      resolved before comparing.
+    * **Named canonically.** The key is derived from the *resolved* path, not
+      from how the glob happened to reach it: ``../bundle/a.md`` and ``a.md``
+      are the same note and must digest identically. It is then normalised to
+      NFC, because macOS leans NFD while ext4 preserves whatever bytes it was
+      handed, and one logical filename must produce one key on every host.
+
+    Known and accepted residue: a hardlink to a file outside the bundle is
+    indistinguishable from an ordinary file at the path layer, and a rename
+    between this check and the read is a TOCTOU window. Closing either
+    properly needs an openat-anchored walk reading from verified descriptors,
+    which belongs with the Gateway child (Epic #1 / C3) rather than in a
+    skeleton. Neither is reachable without write access to the bundle
+    directory, which in this deployment means access to the host already.
     """
     try:
+        if path.is_symlink():
+            return None
         resolved_root = bundle_root.resolve()
         resolved = path.resolve()
+        if resolved_root not in resolved.parents:
+            return None
+        rel = resolved.relative_to(resolved_root)
     except (OSError, ValueError, RuntimeError):
-        return False
-    return resolved_root in resolved.parents
+        return None
+    return unicodedata.normalize("NFC", rel.as_posix())
 
 
 def read_bundle_descriptor(bundle_root: Path) -> dict[str, Any]:
@@ -94,7 +118,7 @@ def read_bundle_descriptor(bundle_root: Path) -> dict[str, Any]:
     required. Callers see an empty mapping and fall back to reporting unknown.
     """
     path = bundle_root / BUNDLE_DESCRIPTOR
-    if not _within_bundle(path, bundle_root):
+    if bundle_member_key(path, bundle_root) is None:
         return {}
     try:
         raw = path.read_bytes()
@@ -106,44 +130,22 @@ def read_bundle_descriptor(bundle_root: Path) -> dict[str, Any]:
         return {}
 
 
-def _canonical_relpath(path: Path, bundle_root: Path) -> str:
-    """The bundle-relative path in the one form every host agrees on.
-
-    Filenames carrying combining characters are stored differently by
-    different filesystems -- macOS leans NFD, ext4 preserves whatever bytes it
-    was handed -- so ``café.md`` checked out on two machines can be two byte
-    sequences for one logical name. Keying the digest on the raw string would
-    make ``index_revision`` host-dependent, and contract §5.5 treats a rebuild
-    that cannot be reproduced as a rollback trigger. NFC is the canonical form
-    to compare in.
-    """
-    return unicodedata.normalize("NFC", path.relative_to(bundle_root).as_posix())
-
-
 def iter_note_paths(bundle_root: Path, note_glob: str) -> list[Path]:
     """Every note in the bundle, in a deterministic order.
 
-    Sorted by the canonical relative path so the digest depends on neither
-    filesystem walk order nor the host's unicode normalisation habits.
+    Sorted by the canonical key, tie-broken on the raw path: two byte-distinct
+    names can share one canonical form on a filesystem that preserves what it
+    was given, and without a tie-break their order -- and so the digest --
+    would inherit whatever order the glob returned.
     """
     if not bundle_root.is_dir():
         return []
-    notes = [
-        p
+    keyed = [
+        (key, p.as_posix(), p)
         for p in bundle_root.glob(note_glob)
-        if p.is_file() and _within_bundle(p, bundle_root)
+        if p.is_file() and (key := bundle_member_key(p, bundle_root)) is not None
     ]
-    # Two byte-distinct names can share one canonical form on a filesystem
-    # that preserves what it was given. Tie-break on the raw path so the order
-    # -- and therefore the digest -- stays deterministic instead of inheriting
-    # whatever order the glob happened to return.
-    return sorted(
-        notes,
-        key=lambda p: (
-            _canonical_relpath(p, bundle_root),
-            p.relative_to(bundle_root).as_posix(),
-        ),
-    )
+    return [p for _, _, p in sorted(keyed, key=lambda item: item[:2])]
 
 
 def compute_index_revision(bundle_root: Path, note_glob: str) -> str | None:
@@ -154,19 +156,25 @@ def compute_index_revision(bundle_root: Path, note_glob: str) -> str | None:
     same digest, so two materially different bundles would report one
     revision. Do not "simplify" this to ``read_text``.
     """
-    if not bundle_root.is_dir():
+    notes = iter_note_paths(bundle_root, note_glob)
+    if not notes:
+        # No notes is not "the digest of an empty set" -- there is nothing to
+        # serve, so there is no revision. Returning a digest here is what let
+        # /health report 503 while /revision handed back a revision.
         return None
 
     digest = hashlib.sha256()
     digest.update(INDEX_ALGORITHM.encode("utf-8"))
     digest.update(b"\n")
 
-    for path in iter_note_paths(bundle_root, note_glob):
+    for path in notes:
+        rel = bundle_member_key(path, bundle_root)
+        if rel is None:
+            return None
         try:
             content = path.read_bytes()
         except (OSError, ValueError):
             return None
-        rel = _canonical_relpath(path, bundle_root)
         digest.update(rel.encode("utf-8"))
         digest.update(b"\0")
         digest.update(hashlib.sha256(content).hexdigest().encode("ascii"))
@@ -209,7 +217,7 @@ def _stamped_commit(bundle_root: Path) -> str | None:
     are decoded explicitly instead.
     """
     stamp_path = bundle_root / BUNDLE_COMMIT_STAMP
-    if not _within_bundle(stamp_path, bundle_root):
+    if bundle_member_key(stamp_path, bundle_root) is None:
         return None
     try:
         raw = stamp_path.read_bytes()
@@ -247,8 +255,11 @@ def resolve_profile_version(
 ) -> tuple[str | None, str]:
     """The bundle's own declaration wins; config expresses an expectation."""
     declared = read_bundle_descriptor(bundle_root).get("profile_version")
-    if isinstance(declared, str) and declared:
-        return declared, "bundle-descriptor"
+    # isinstance before truthiness: `profile_version = 42` in a descriptor is
+    # not a version, and reporting it would put a non-string in a string field.
+    # A blank or whitespace-only declaration is not a declaration either.
+    if isinstance(declared, str) and declared.strip():
+        return declared.strip(), "bundle-descriptor"
     expected = config.profile_expected_version
     if expected:
         return expected, "config"
@@ -278,19 +289,15 @@ def build_revision(config: Config) -> Revision:
 def bundle_is_readable(bundle_root: Path, note_glob: str) -> bool:
     """Can this bundle actually be served?
 
-    Listing the notes is not enough. A note that exists but cannot be read --
-    wrong ownership after a volume mount, say -- passes ``is_file`` and then
-    makes ``index_revision`` null, so /health would report ok while /revision
-    reported nothing. Health answers the question by doing the same work
-    /revision does, which makes the two consistent by construction rather than
-    by two implementations agreeing.
+    Answered by the single computation /revision reports, so the two cannot
+    disagree by construction. Listing was not enough: a note that exists but
+    cannot be read passes ``is_file`` and then makes ``index_revision`` null,
+    and an empty bundle produced a digest with nothing behind it.
 
-    That means /health digests the bundle. Acceptable at skeleton scale and
-    with a synthetic bundle; the Gateway child (Epic #1 / C3) is where a cached
-    revision with explicit invalidation belongs.
+    /health therefore digests the bundle. Acceptable at skeleton scale with a
+    synthetic bundle; a cached revision with explicit invalidation belongs to
+    the Gateway child (Epic #1 / C3).
     """
-    if not iter_note_paths(bundle_root, note_glob):
-        return False
     return compute_index_revision(bundle_root, note_glob) is not None
 
 
@@ -300,6 +307,7 @@ __all__ = [
     "Revision",
     "build_revision",
     "bundle_is_readable",
+    "bundle_member_key",
     "compute_index_revision",
     "iter_note_paths",
     "resolve_bundle_commit",

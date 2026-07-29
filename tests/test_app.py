@@ -14,10 +14,17 @@ from fastapi.testclient import TestClient
 
 from ckp.app import create_app
 from ckp.config import load_config
-from ckp.revision import API_VERSION, compute_index_revision
+from ckp.revision import API_VERSION, compute_index_revision, resolve_bundle_commit
 from conftest import REPO_ROOT
 
 FIXTURE_BUNDLE = REPO_ROOT / "fixtures" / "synthetic-bundle"
+
+#: See tests/test_revision.py: asserting the shipped fixture reports a commit
+#: needs this checkout to be resolvable, not merely for git to be installed.
+requires_bundle_commit = pytest.mark.skipif(
+    resolve_bundle_commit(FIXTURE_BUNDLE)[0] is None,
+    reason="fixture bundle has no resolvable commit here",
+)
 CONTRACT_FIELDS = ("profile_version", "api_version", "bundle_commit", "index_revision")
 
 #: Written out rather than imported. Asserting against ``API_VERSION`` only
@@ -51,6 +58,7 @@ def test_health_is_degraded_when_the_bundle_is_missing(tmp_path) -> None:
     assert body["checks"]["bundle_readable"] is False
 
 
+@requires_bundle_commit
 def test_revision_returns_all_four_contract_fields(client: TestClient) -> None:
     response = client.get("/revision")
     assert response.status_code == 200
@@ -118,6 +126,7 @@ def test_config_override_reaches_the_endpoint(tmp_path) -> None:
 # --- oracles that a wrong implementation could previously satisfy ----------
 
 
+@requires_bundle_commit
 def test_bundle_commit_equals_the_repositorys_head(client: TestClient) -> None:
     """Truthiness is not an assertion: pin the value against git directly."""
     head = subprocess.run(
@@ -195,3 +204,22 @@ def test_health_is_degraded_when_a_note_cannot_be_read(tmp_path) -> None:
         assert revision["index_revision"] is None
     finally:
         os.chmod(note, 0o644)
+
+
+def test_api_version_is_bound_to_the_constant_not_copied(monkeypatch) -> None:
+    """Pinning the value is not the same as pinning the wiring.
+
+    `FastAPI(version="0.1")` hardcoded would satisfy every other assertion
+    here, because the literal and the constant currently agree. Move the
+    constant to a sentinel and everything downstream must move with it.
+    """
+    sentinel = "sentinel-9.9"
+    monkeypatch.setattr("ckp.app.API_VERSION", sentinel)
+    monkeypatch.setattr("ckp.revision.API_VERSION", sentinel)
+
+    client = TestClient(
+        create_app(load_config(env={"CKP_BUNDLE_ROOT": str(FIXTURE_BUNDLE)}))
+    )
+    assert client.app.version == sentinel
+    assert client.get("/openapi.json").json()["info"]["version"] == sentinel
+    assert client.get("/revision").json()["api_version"] == sentinel

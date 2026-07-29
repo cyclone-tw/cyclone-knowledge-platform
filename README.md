@@ -56,13 +56,21 @@ a derived value and a self-declared one stay distinguishable.
 | `profile_version` | the bundle's `bundle.toml` | config `profile.expected_version`, then `null` |
 | `api_version` | `ckp.revision.API_VERSION` — also the published schema version | — |
 | `bundle_commit` | `git rev-parse HEAD` in the bundle | a build-time `.bundle-commit` stamp, then `null` |
-| `index_revision` | sha256 over the bundle's note paths and bytes | `null` when the bundle is unreadable |
+| `index_revision` | sha256 over the bundle's note paths and bytes | `null` when the bundle is unreadable or holds no notes |
 
 Two properties are load-bearing rather than cosmetic. `index_revision` is
 **derived**: same bundle, same digest, on any host — contract §5.5 makes a
 non-reproducible rebuild a rollback trigger. And nothing is **fabricated**:
 absent evidence reports as `null`, because a placeholder would make a broken
 deployment look identical to a healthy one.
+
+`/health` answers by running the same computation, so it cannot report ok on a
+bundle `/revision` finds nothing in. Notes reached through a symlink are not
+bundle members: a link out would make the revision depend on state the bundle
+does not carry. A hardlink to a file outside the bundle is indistinguishable
+at the path layer and remains possible; closing that, and the window between
+checking a path and reading it, needs an openat-anchored walk and belongs with
+the Gateway child.
 
 ## Configuration
 
