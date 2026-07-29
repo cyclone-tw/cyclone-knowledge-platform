@@ -90,6 +90,20 @@ def bundle_member_key(path: Path, bundle_root: Path) -> str | None:
       NFC, because macOS leans NFD while ext4 preserves whatever bytes it was
       handed, and one logical filename must produce one key on every host.
 
+    The symlink check covers *every* component below the root, not just the
+    final one. A pattern naming a symlinked directory -- ``alias/*.md`` where
+    ``alias`` links to ``real`` -- reaches a file that is not itself a link,
+    and containment then passes because the target is inside the bundle. What
+    it produces is the same note under a second route: with ``*/*.md`` both
+    ``alias/a.md`` and ``real/a.md`` appear, and since the key comes from the
+    resolved path they key identically, so one note is hashed into the digest
+    twice. It also leaves the intermediate link swappable between check and
+    read. The root itself is exempt, because mounting a checkout at a stable
+    path is the normal case.
+
+    Members must also be regular files. A FIFO named ``bundle.toml`` is not a
+    descriptor, and reading one is at best meaningless.
+
     Known and accepted residue: a hardlink to a file outside the bundle is
     indistinguishable from an ordinary file at the path layer, and a rename
     between this check and the read is a TOCTOU window. Closing either
@@ -99,7 +113,12 @@ def bundle_member_key(path: Path, bundle_root: Path) -> str | None:
     directory, which in this deployment means access to the host already.
     """
     try:
-        if path.is_symlink():
+        probe = bundle_root
+        for part in path.relative_to(bundle_root).parts:
+            probe = probe / part
+            if probe.is_symlink():
+                return None
+        if not path.is_file():
             return None
         resolved_root = bundle_root.resolve()
         resolved = path.resolve()
@@ -143,7 +162,7 @@ def iter_note_paths(bundle_root: Path, note_glob: str) -> list[Path]:
     keyed = [
         (key, p.as_posix(), p)
         for p in bundle_root.glob(note_glob)
-        if p.is_file() and (key := bundle_member_key(p, bundle_root)) is not None
+        if (key := bundle_member_key(p, bundle_root)) is not None
     ]
     return [p for _, _, p in sorted(keyed, key=lambda item: item[:2])]
 

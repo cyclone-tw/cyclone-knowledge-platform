@@ -18,6 +18,7 @@ from ckp.revision import (
     API_VERSION,
     build_revision,
     bundle_is_readable,
+    bundle_member_key,
     compute_index_revision,
     iter_note_paths,
     read_bundle_descriptor,
@@ -543,3 +544,68 @@ def test_declared_version_is_stripped(tmp_path) -> None:
         "v9",
         "bundle-descriptor",
     )
+
+
+# --- symlinked directories, not just symlinked files (Codex r3 #1) ---------
+
+
+def _symlinked_dir_bundle(tmp_path) -> tuple[Path, Path]:
+    root = tmp_path / "bundle"
+    (root / "real").mkdir(parents=True)
+    (root / "real" / "a.md").write_bytes(b"alpha\n")
+    (root / "alias").symlink_to(root / "real", target_is_directory=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "x.md").write_bytes(b"content from outside the bundle\n")
+    (root / "escape").symlink_to(outside, target_is_directory=True)
+    return root, outside
+
+
+def test_pattern_naming_a_symlinked_directory_finds_nothing(tmp_path) -> None:
+    """`**` skips symlinked directories, but a pattern naming one walks it."""
+    root, _ = _symlinked_dir_bundle(tmp_path)
+    assert iter_note_paths(root, "alias/*.md") == []
+
+
+def test_symlinked_directory_cannot_duplicate_a_note(tmp_path) -> None:
+    """The real defect: one note reachable twice, hashed into the digest twice.
+
+    Both routes key to the resolved path, so they are indistinguishable in the
+    digest input and the same content is counted more than once.
+    """
+    root, _ = _symlinked_dir_bundle(tmp_path)
+    keys = [bundle_member_key(p, root) for p in iter_note_paths(root, "*/*.md")]
+    assert keys == ["real/a.md"]
+    assert len(keys) == len(set(keys))
+
+
+def test_directory_symlink_out_of_the_bundle_stays_excluded(tmp_path) -> None:
+    root, _ = _symlinked_dir_bundle(tmp_path)
+    for pattern in ("escape/*.md", "*/*.md", "**/*.md"):
+        names = [p.name for p in iter_note_paths(root, pattern)]
+        assert "x.md" not in names, pattern
+
+
+# --- members must be regular files (Codex r3 #2) ---------------------------
+
+
+def test_a_fifo_is_not_a_bundle_member(tmp_path) -> None:
+    """Not reproducible as a hang on macOS 3.14 or Linux 3.12, but a FIFO named
+    bundle.toml is not a descriptor and reading one is meaningless at best."""
+    root = _bundle(tmp_path / "b", {"a.md": b"alpha\n"})
+    os.mkfifo(root / "bundle.toml")
+    os.mkfifo(root / ".bundle-commit")
+    os.mkfifo(root / "note.md")
+
+    assert bundle_member_key(root / "bundle.toml", root) is None
+    assert bundle_member_key(root / ".bundle-commit", root) is None
+    assert read_bundle_descriptor(root) == {}
+    assert resolve_bundle_commit(root) == (None, "unknown")
+    assert [p.name for p in iter_note_paths(root, GLOB)] == ["a.md"]
+
+
+def test_a_directory_is_not_a_bundle_member(tmp_path) -> None:
+    root = _bundle(tmp_path / "b", {"a.md": b"alpha\n"})
+    (root / "notadir.md").mkdir()
+    assert bundle_member_key(root / "notadir.md", root) is None
+    assert [p.name for p in iter_note_paths(root, GLOB)] == ["a.md"]
