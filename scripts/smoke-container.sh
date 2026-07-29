@@ -156,13 +156,13 @@ from ckp.privacy import (
 )
 from ckp.privacy.gate import REASON_STUDENT_PRIVATE_SINK
 
-gate = PrivacyGate(
-    FrontmatterClassifier(),
-    frozenset({PrivacyClass.PUBLIC, PrivacyClass.INTERNAL}),
-)
 failures = []
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
+    gate = PrivacyGate(
+        FrontmatterClassifier(root),
+        frozenset({PrivacyClass.PUBLIC, PrivacyClass.INTERNAL}),
+    )
     ok = root / "ok.md"
     ok.write_bytes(b"---\nprivacy: public\n---\n\n# synthetic\n")
     undetermined = root / "undetermined.md"

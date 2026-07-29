@@ -129,6 +129,26 @@ def note_with_invalid_privacy(directory: Path) -> Path:
     )
 
 
+def note_with_no_space_after_colon(directory: Path) -> Path:
+    """Not a YAML mapping: block mappings require whitespace after the colon.
+
+    A parser that accepts this classifies a note the rule source would not.
+    """
+    return write_note(
+        directory,
+        "no-space-privacy.md",
+        "---\ntitle: Synthetic missing separator\nprivacy:public\n---\n\n# body\n",
+    )
+
+
+def note_with_no_space_quoted(directory: Path) -> Path:
+    return write_note(
+        directory,
+        "no-space-quoted-privacy.md",
+        '---\ntitle: Synthetic missing separator\nprivacy:"public"\n---\n\n# body\n',
+    )
+
+
 def note_with_miscased_privacy(directory: Path) -> Path:
     return write_note(
         directory,

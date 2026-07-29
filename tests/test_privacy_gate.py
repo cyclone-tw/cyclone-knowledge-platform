@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -27,14 +28,14 @@ from privacy_fixtures import (
 CORE_ROUTE = frozenset({PrivacyClass.PUBLIC, PrivacyClass.INTERNAL})
 
 
-def core_gate() -> PrivacyGate:
+def core_gate(bundle_root: Path) -> PrivacyGate:
     """The Decision §6 Core-route acceptance set: {public, internal}."""
-    return PrivacyGate(FrontmatterClassifier(), CORE_ROUTE)
+    return PrivacyGate(FrontmatterClassifier(bundle_root), CORE_ROUTE)
 
 
 def test_admits_a_class_inside_the_admissible_set(tmp_path: Path) -> None:
     note = classed_note(tmp_path, "internal")
-    verdict = core_gate().admit(note)
+    verdict = core_gate(tmp_path).admit(note)
     assert isinstance(verdict, Admitted)
     assert verdict.privacy is PrivacyClass.INTERNAL
     assert verdict.path == note
@@ -44,7 +45,7 @@ def test_refuses_a_determined_class_outside_the_admissible_set(
     tmp_path: Path,
 ) -> None:
     note = classed_note(tmp_path, "sensitive")
-    verdict = core_gate().admit(note)
+    verdict = core_gate(tmp_path).admit(note)
     assert isinstance(verdict, Refused)
     assert verdict.reason == REASON_NOT_ADMISSIBLE
 
@@ -61,7 +62,7 @@ def test_an_undetermined_item_cannot_pass(tmp_path: Path, factory) -> None:
     green-to-admitted -- so this test goes red. Having *a* value is not the
     same as having *determined* one.
     """
-    verdict = core_gate().admit(factory(tmp_path))
+    verdict = core_gate(tmp_path).admit(factory(tmp_path))
     assert isinstance(verdict, Refused)
 
 
@@ -75,7 +76,7 @@ def test_student_private_is_refused_with_its_dedicated_code(
     "not admissible", and this assertion is what turns that mutation red.
     """
     note = classed_note(tmp_path, "student-private")
-    verdict = core_gate().admit(note)
+    verdict = core_gate(tmp_path).admit(note)
     assert isinstance(verdict, Refused)
     assert verdict.reason == REASON_STUDENT_PRIVATE_SINK
 
@@ -84,7 +85,7 @@ def test_a_gate_admitting_student_private_cannot_be_built(tmp_path: Path) -> Non
     """Construction-layer half: widening a refused combination fails closed."""
     with pytest.raises(PrivacyPolicyError):
         PrivacyGate(
-            FrontmatterClassifier(),
+            FrontmatterClassifier(tmp_path),
             frozenset({PrivacyClass.PUBLIC, PrivacyClass.STUDENT_PRIVATE}),
         )
 
@@ -101,9 +102,28 @@ def test_admitted_cannot_be_minted_outside_the_gate(tmp_path: Path) -> None:
         )
 
 
+def test_admission_cannot_be_rewritten_into_a_different_one(
+    tmp_path: Path,
+) -> None:
+    """A real seal must not survive a field rewrite.
+
+    ``dataclasses.replace`` re-runs construction with the *original* seal, so
+    an unbound seal would let an admitted public note be rewritten into an
+    "admitted" student-private one. The seal binds path and privacy; both
+    rewrites must refuse.
+    """
+    note = classed_note(tmp_path, "public")
+    admitted = core_gate(tmp_path).admit(note)
+    assert isinstance(admitted, Admitted)
+    with pytest.raises(PrivacyPolicyError):
+        dataclasses.replace(admitted, privacy=PrivacyClass.STUDENT_PRIVATE)
+    with pytest.raises(PrivacyPolicyError):
+        dataclasses.replace(admitted, path=tmp_path / "other.md")
+
+
 def test_refusal_receipts_never_echo_payload(tmp_path: Path) -> None:
     note = note_with_invalid_privacy(tmp_path)
-    verdict = core_gate().admit(note)
+    verdict = core_gate(tmp_path).admit(note)
     assert isinstance(verdict, Refused)
     assert PAYLOAD_SENTINEL not in verdict.reason
     assert PAYLOAD_SENTINEL not in repr(verdict)
@@ -118,7 +138,7 @@ def test_partition_accounts_for_every_path(tmp_path: Path) -> None:
         classed_note(tmp_path, "student-private"),
         note_without_privacy(tmp_path),
     ]
-    admitted, refused = core_gate().partition(paths)
+    admitted, refused = core_gate(tmp_path).partition(paths)
     assert {a.path for a in admitted} == set(paths[:2])
     assert {r.path for r in refused} == set(paths[2:])
     assert len(admitted) + len(refused) == len(paths)

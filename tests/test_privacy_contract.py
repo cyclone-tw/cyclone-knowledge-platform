@@ -7,11 +7,13 @@ They are the tests the Epic's named mutations are aimed at.
 
 from __future__ import annotations
 
+import ast
 import inspect
 import types
+from pathlib import Path
 
 import ckp.privacy as privacy_pkg
-from ckp.privacy import PrivacyClass, PrivacyGate, Unclassified
+from ckp.privacy import FrontmatterClassifier, PrivacyClass, PrivacyGate, Unclassified
 from conftest import REPO_ROOT
 
 #: The four literal tokens of decision-cyclone-privacy-sink-v1 §1, written
@@ -52,6 +54,10 @@ def test_gate_parameters_are_required_not_optional() -> None:
     parameters = inspect.signature(PrivacyGate.__init__).parameters
     assert parameters["classifier"].default is inspect.Parameter.empty
     assert parameters["admissible"].default is inspect.Parameter.empty
+    # Same rule for the classifier itself: the bundle root it contains reads
+    # to is a decision, and decisions do not get defaults.
+    classifier_params = inspect.signature(FrontmatterClassifier.__init__).parameters
+    assert classifier_params["bundle_root"].default is inspect.Parameter.empty
 
 
 def test_undetermined_carries_no_privacy_class_at_all() -> None:
@@ -89,22 +95,76 @@ def test_no_prebuilt_gate_or_default_classifier_is_exported() -> None:
         )
 
 
-def test_future_read_and_enqueue_paths_reference_the_privacy_package() -> None:
-    """Tripwire for C3/C8: a read or enqueue package that never mentions the
+def _imports_privacy_package(package_root: Path) -> bool:
+    """Does any module under ``package_root`` actually import ``ckp.privacy``?
+
+    Checked on the AST, not by string search: a comment or docstring that
+    merely *mentions* the package must not satisfy the tripwire. An import
+    statement is the weakest thing that cannot be faked in prose -- and an
+    import that is never used fails CI separately (ruff F401), so
+    imported-and-unused cannot slip through either.
+    """
+    for source in package_root.rglob("*.py"):
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                if any(
+                    alias.name == "ckp.privacy" or alias.name.startswith("ckp.privacy.")
+                    for alias in node.names
+                ):
+                    return True
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if module == "ckp.privacy" or module.startswith("ckp.privacy."):
+                    return True
+                if module == "ckp" and any(
+                    alias.name == "privacy" for alias in node.names
+                ):
+                    return True
+    return False
+
+
+def test_future_read_and_enqueue_paths_import_the_privacy_package() -> None:
+    """Tripwire for C3/C8: a read or enqueue package that never imports the
     privacy package cannot be taking it as a required constructor parameter.
 
-    A grep is deliberately crude -- it cannot prove correct wiring, only make
-    silently-absent wiring impossible. Review still owns the rest.
+    An import cannot prove *correct* wiring -- review still owns that -- but
+    its absence proves absent wiring, and that is what must be impossible to
+    land silently.
     """
     for package in FUTURE_GATED_PACKAGES:
         root = REPO_ROOT / "src" / "ckp" / package
         if not root.exists():
             continue
-        sources = list(root.rglob("*.py"))
-        assert sources, f"src/ckp/{package} exists but holds no Python source"
-        combined = "\n".join(p.read_text(encoding="utf-8") for p in sources)
-        assert "ckp.privacy" in combined or "PrivacyGate" in combined, (
-            f"src/ckp/{package} exists but never references ckp.privacy; "
+        assert list(root.rglob("*.py")), (
+            f"src/ckp/{package} exists but holds no Python source"
+        )
+        assert _imports_privacy_package(root), (
+            f"src/ckp/{package} exists but never imports ckp.privacy; "
             "red line R1 requires the classifier as a required constructor "
             "parameter on every read and enqueue path (Epic #1)"
         )
+
+
+def test_the_tripwire_cannot_be_satisfied_by_a_comment(tmp_path: Path) -> None:
+    """The tripwire is a guard, so it gets the planted-package treatment.
+
+    A package whose only reference to ckp.privacy lives in a comment and a
+    docstring must not pass; a real import must.
+    """
+    faked = tmp_path / "faked"
+    faked.mkdir()
+    (faked / "__init__.py").write_text(
+        '"""Mentions ckp.privacy and PrivacyGate in prose only."""\n'
+        "# TODO: wire up ckp.privacy some day\n",
+        encoding="utf-8",
+    )
+    assert not _imports_privacy_package(faked)
+
+    wired = tmp_path / "wired"
+    wired.mkdir()
+    (wired / "__init__.py").write_text(
+        'from ckp.privacy import PrivacyGate\n\n__all__ = ["PrivacyGate"]\n',
+        encoding="utf-8",
+    )
+    assert _imports_privacy_package(wired)

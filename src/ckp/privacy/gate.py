@@ -42,29 +42,43 @@ class PrivacyPolicyError(ValueError):
     """A gate was configured to violate the privacy Decision."""
 
 
-class _Seal:
-    """Module-private capability token; only the gate holds the instance."""
+@dataclass(frozen=True)
+class _SealToken:
+    """Module-private mint record, bound to the exact fields it admitted.
 
-    __slots__ = ()
+    Binding matters: an unbound seal survives ``dataclasses.replace``, so a
+    legitimately admitted public note could be rewritten into an "admitted"
+    student-private one while carrying the original seal. The token pins the
+    admitted ``path`` and ``privacy``; any field rewrite breaks the binding
+    and construction refuses.
+    """
 
-
-_SEAL = _Seal()
+    path: Path
+    privacy: PrivacyClass
 
 
 @dataclass(frozen=True)
 class Admitted:
     """Proof that one item passed one gate. Mintable only by the gate.
 
-    The seal is a capability check, not cryptography: it stops the honest
-    mistake of constructing an admission by hand instead of running the gate.
+    The seal is a capability check, not cryptography: Python offers no true
+    private constructors, so code that deliberately imports the private token
+    type can still forge one. What the seal stops is every *honest* route to
+    an unadmitted admission -- direct construction, and field rewrites via
+    ``dataclasses.replace`` on a real one.
     """
 
     path: Path
     privacy: PrivacyClass
-    _seal: _Seal = field(repr=False, compare=False, kw_only=True)
+    _seal: _SealToken = field(repr=False, compare=False, kw_only=True)
 
     def __post_init__(self) -> None:
-        if self._seal is not _SEAL:
+        seal = self._seal
+        if (
+            type(seal) is not _SealToken
+            or seal.path != self.path
+            or seal.privacy is not self.privacy
+        ):
             raise PrivacyPolicyError(
                 "Admitted can only be minted by PrivacyGate.admit; "
                 "construct a gate and pass the item through it"
@@ -122,7 +136,11 @@ class PrivacyGate:
             return Refused(path=path, reason=REASON_STUDENT_PRIVATE_SINK)
         if outcome.privacy not in self._admissible:
             return Refused(path=path, reason=REASON_NOT_ADMISSIBLE)
-        return Admitted(path=path, privacy=outcome.privacy, _seal=_SEAL)
+        return Admitted(
+            path=path,
+            privacy=outcome.privacy,
+            _seal=_SealToken(path=path, privacy=outcome.privacy),
+        )
 
     def partition(self, paths: Iterable[Path]) -> tuple[list[Admitted], list[Refused]]:
         """Every path, split into admitted and refused. Nothing is dropped.

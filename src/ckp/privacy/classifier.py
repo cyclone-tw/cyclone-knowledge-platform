@@ -38,9 +38,11 @@ from pathlib import Path
 from typing import Protocol, final
 
 from ckp.privacy.classes import PrivacyClass
+from ckp.revision import bundle_member_key
 
 #: Provisional reason codes for undetermined outcomes. Stable within this
 #: repo; renamed only via the Writer namespace mapping table, never ad hoc.
+REASON_NOT_A_BUNDLE_MEMBER = "not-a-bundle-member"
 REASON_UNREADABLE = "note-unreadable"
 REASON_FRONTMATTER_MISSING = "frontmatter-missing"
 REASON_FRONTMATTER_UNTERMINATED = "frontmatter-unterminated"
@@ -51,9 +53,12 @@ REASON_PRIVACY_INVALID = "privacy-invalid"
 #: A column-zero privacy declaration. The value group is matched against the
 #: class tokens separately so that *any* other line shape -- trailing comment,
 #: block-scalar marker, list item -- fails as a whole line, not as a value.
+#: The separator after the colon is ``+``, not ``*``: YAML block mappings
+#: require whitespace there, so ``privacy:public`` is not a mapping and a
+#: parser that accepted it would classify a note the rule source would not.
 _PRIVACY_KEY = re.compile(r"^privacy:")
 _PRIVACY_DECLARATION = re.compile(
-    r"^privacy:[ \t]*(?P<quote>['\"]?)(?P<value>[a-z-]+)(?P=quote)[ \t]*$"
+    r"^privacy:[ \t]+(?P<quote>['\"]?)(?P<value>[a-z-]+)(?P=quote)[ \t]*$"
 )
 
 
@@ -120,18 +125,29 @@ def _frontmatter_lines(text: str) -> tuple[list[str] | None, str | None]:
 
 @final
 class FrontmatterClassifier:
-    """Classify a note by the single privacy declaration in its frontmatter."""
+    """Classify a note by the single privacy declaration in its frontmatter.
+
+    Constructed against a bundle root, which is **required**: this is a
+    separate read point from the C1 bundle walk and inherits none of its
+    containment, so it applies the same membership rule itself via
+    ``bundle_member_key`` -- one implementation, reused, so the two read
+    points cannot drift. That refuses symlinks at *every* component below the
+    root (a ``bundle/inbox -> /outside`` link must not pull external content
+    into classification), refuses paths that resolve outside the root, and
+    refuses non-regular files, while keeping C1's allowance for the root
+    itself being a symlink (mounting a checkout at a stable path is normal).
+
+    The remaining check-to-read race is the same known residue as C1's,
+    owned by the openat-anchored walk in C3 (Epic #1).
+    """
+
+    def __init__(self, bundle_root: Path) -> None:
+        self._bundle_root = bundle_root
 
     def classify(self, path: Path) -> Classification:
-        # The bundle walk (ckp.revision) refuses symlinks per component, but
-        # this is a separate read point and inherits none of that: a symlink
-        # handed directly to the classifier could pull in content from outside
-        # any bundle. Refused here for the final component; the remaining
-        # check-to-read race is the same known residue as C1's, owned by the
-        # openat-anchored walk in C3 (Epic #1).
+        if bundle_member_key(path, self._bundle_root) is None:
+            return Unclassified(reason=REASON_NOT_A_BUNDLE_MEMBER)
         try:
-            if path.is_symlink() or not path.is_file():
-                return Unclassified(reason=REASON_UNREADABLE)
             raw = path.read_bytes()
         except (OSError, ValueError):
             return Unclassified(reason=REASON_UNREADABLE)
@@ -164,6 +180,7 @@ class FrontmatterClassifier:
 __all__ = [
     "REASON_FRONTMATTER_MISSING",
     "REASON_FRONTMATTER_UNTERMINATED",
+    "REASON_NOT_A_BUNDLE_MEMBER",
     "REASON_PRIVACY_DUPLICATE",
     "REASON_PRIVACY_INVALID",
     "REASON_PRIVACY_MISSING",
