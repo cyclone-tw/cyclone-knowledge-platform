@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Container runtime smoke for the walking skeleton.
+# Container runtime smoke for revision, privacy, Catalog, and Gateway.
 #
 # Builds the image from a clean context, runs it, and asserts that /revision
 # reports *evidence* rather than placeholders. The assertion that matters is
@@ -187,4 +187,131 @@ if failures:
         print(f"smoke: {line}", file=sys.stderr)
     sys.exit(1)
 print("smoke: privacy gate refuses what it must on the deployment interpreter")
+PY
+
+# C3 Gateway smoke through the production HTTP surface. Add synthetic notes
+# only inside this disposable container: the tracked bundle stays public-only,
+# while the already-running process must notice the mutation and rebuild its
+# app-owned snapshot cache.
+echo "==> Catalog and Gateway HTTP smoke"
+initial_catalog="$(curl -fsS "http://127.0.0.1:$PORT/catalog?limit=100")"
+docker exec -i "$NAME" python - <<'PY'
+from pathlib import Path
+
+root = Path("/app/fixtures/synthetic-bundle")
+(root / "c3-public.md").write_text(
+    "---\n"
+    "privacy: public\n"
+    "title: C3 Public Needle\n"
+    "type: Concept\n"
+    "content_category: development\n"
+    "---\n\n"
+    "# C3 Public Needle\n\n"
+    "gatewayneedle synthetic public body.\n",
+    encoding="utf-8",
+)
+(root / "c3-undetermined.md").write_text(
+    "---\n"
+    "title: C3 Missing Needle\n"
+    "type: Concept\n"
+    "content_category: development\n"
+    "---\n\n"
+    "gatewayneedle privacy is deliberately absent.\n",
+    encoding="utf-8",
+)
+(root / "c3-student.md").write_text(
+    "---\n"
+    "privacy: student-private\n"
+    "title: Invented Learner Needle\n"
+    "type: Concept\n"
+    "content_category: development\n"
+    "---\n\n"
+    "gatewayneedle entirely synthetic student fixture.\n",
+    encoding="utf-8",
+)
+PY
+
+catalog="$(curl -fsS "http://127.0.0.1:$PORT/catalog?limit=100")"
+query="$(
+  curl -fsS \
+    -H 'content-type: application/json' \
+    --data '{"query":"gatewayneedle","limit":20}' \
+    "http://127.0.0.1:$PORT/query"
+)"
+gateway_revision="$(curl -fsS "http://127.0.0.1:$PORT/revision")"
+
+python3 - "$initial_catalog" "$catalog" "$query" "$gateway_revision" <<'PY'
+import json
+import sys
+
+initial = json.loads(sys.argv[1])
+catalog = json.loads(sys.argv[2])
+query = json.loads(sys.argv[3])
+revision = json.loads(sys.argv[4])
+failures = []
+
+if catalog.get("total") != initial.get("total", -1) + 1:
+    failures.append(
+        "Catalog total did not increase by exactly the one public synthetic note"
+    )
+
+def facet_count(payload, facet, value):
+    buckets = payload.get("facets", {}).get(facet, [])
+    return next((bucket.get("count") for bucket in buckets if bucket.get("value") == value), 0)
+
+if facet_count(catalog, "types", "Concept") != facet_count(
+    initial, "types", "Concept"
+) + 1:
+    failures.append("Concept facet counted a refused synthetic note")
+
+results = query.get("results", [])
+if query.get("total") != 1 or len(results) != 1:
+    failures.append("bounded lexical query did not return exactly one public result")
+elif results[0].get("title") != "C3 Public Needle":
+    failures.append("query returned the wrong result")
+else:
+    citation = results[0].get("citation")
+    if not citation:
+        failures.append("Gateway result has no citation")
+    else:
+        if citation.get("path") != "c3-public.md":
+            failures.append(f"citation path is {citation.get('path')!r}")
+        if citation.get("concept_id") != results[0].get("concept_id"):
+            failures.append("citation points at a different result")
+        if citation.get("index_revision") != query.get("revision", {}).get(
+            "index_revision"
+        ):
+            failures.append("citation and Gateway result use different revisions")
+
+for name, payload in (("Catalog", catalog), ("query", query)):
+    rendered = json.dumps(payload, sort_keys=True)
+    for forbidden in ("C3 Missing Needle", "Invented Learner Needle"):
+        if forbidden in rendered:
+            failures.append(f"{name} leaked refused payload {forbidden!r}")
+
+served_revision = revision.get("index_revision")
+if query.get("revision", {}).get("index_revision") != served_revision:
+    failures.append("Gateway and /revision do not use the same current snapshot")
+if catalog.get("revision", {}).get("index_revision") != served_revision:
+    failures.append("Catalog and /revision do not use the same current snapshot")
+
+if failures:
+    for line in failures:
+        print(f"smoke: {line}", file=sys.stderr)
+    sys.exit(1)
+print("smoke: public-only Catalog and cited Gateway query look right")
+PY
+
+# The runtime path above must work from production dependencies alone.
+docker exec -i "$NAME" python - <<'PY'
+import importlib.util
+import sys
+
+unexpected = [
+    name for name in ("pytest", "ruff", "httpx") if importlib.util.find_spec(name)
+]
+if unexpected:
+    print(f"smoke: dev dependencies present in runtime image: {unexpected}", file=sys.stderr)
+    sys.exit(1)
+print("smoke: Gateway runtime uses no dev dependency")
 PY
