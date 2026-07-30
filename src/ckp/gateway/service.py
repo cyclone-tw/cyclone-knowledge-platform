@@ -38,6 +38,16 @@ def _tokens(query: str) -> tuple[str, ...]:
     return tuple(token for token in _normalise(query).split() if token)
 
 
+def _casefold_with_source_offsets(value: str) -> tuple[str, list[int]]:
+    folded_parts: list[str] = []
+    source_offsets: list[int] = []
+    for index, character in enumerate(value):
+        folded = character.casefold()
+        folded_parts.append(folded)
+        source_offsets.extend([index] * len(folded))
+    return "".join(folded_parts), source_offsets
+
+
 def _citation(entry: CatalogEntry) -> CitationResponse:
     return CitationResponse(
         concept_id=entry.citation.concept_id,
@@ -107,10 +117,12 @@ def _snippet(body: str, tokens: tuple[str, ...]) -> str:
     compact = _WHITESPACE.sub(" ", unicodedata.normalize("NFKC", body)).strip()
     if len(compact) <= _MAX_SNIPPET:
         return compact
-    normalised = compact.casefold()
-    positions = [normalised.find(token) for token in tokens]
-    positions = [position for position in positions if position >= 0]
-    centre = min(positions) if positions else 0
+    normalised, source_offsets = _casefold_with_source_offsets(compact)
+    folded_positions = [normalised.find(token) for token in tokens]
+    positions = [
+        source_offsets[position] for position in folded_positions if position >= 0
+    ]
+    centre = min(positions, default=0)
     start = max(0, centre - (_MAX_SNIPPET // 3))
     end = min(len(compact), start + _MAX_SNIPPET)
     start = max(0, end - _MAX_SNIPPET)

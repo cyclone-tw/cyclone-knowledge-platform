@@ -270,6 +270,15 @@ echo "==> anchored reader mutations"
 new_case
 replace_once \
   "src/ckp/bundle.py" \
+  '            if not stat.S_ISDIR(root_stat.st_mode):' \
+  '            if False and not stat.S_ISDIR(root_stat.st_mode):'
+expect_red \
+  "opened bundle root is not required to be a directory" \
+  tests/test_bundle_reader.py::test_root_fd_must_be_a_directory_even_if_open_flags_are_ignored
+
+new_case
+replace_once \
+  "src/ckp/bundle.py" \
 '    if stat.S_ISLNK(value.st_mode):
         return REFUSAL_SYMLINK' \
 '    if False and stat.S_ISLNK(value.st_mode):
@@ -313,13 +322,98 @@ expect_red \
 new_case
 replace_once \
   "src/ckp/bundle.py" \
+  '            if not _same_directory(before, after):' \
+  '            if False and not _same_directory(before, after):'
+expect_red \
+  "parent replacement during anchored walk accepted" \
+  tests/test_bundle_reader.py::test_parent_replacement_during_walk_is_not_accepted
+
+new_case
+replace_once \
+  "src/ckp/bundle.py" \
   '                if opened_signature != before_signature:' \
   '                if False and opened_signature != before_signature:'
 expect_red \
   "check-to-open inode replacement accepted" \
   tests/test_bundle_reader.py::test_check_to_open_replacement_is_not_accepted
 
+new_case
+replace_once \
+  "src/ckp/bundle.py" \
+  '                if _reason_for_stat(after_stat) is not None:' \
+  '                if False and _reason_for_stat(after_stat) is not None:'
+expect_red \
+  "post-read file type or hardlink change accepted" \
+  tests/test_bundle_reader.py::test_post_read_file_type_or_link_change_is_not_accepted
+
+new_case
+replace_once \
+  "src/ckp/bundle.py" \
+  '                if _file_signature(after_stat) != opened_signature:' \
+  '                if False and _file_signature(after_stat) != opened_signature:'
+expect_red \
+  "post-read fstat signature change accepted" \
+  tests/test_bundle_reader.py::test_post_read_fstat_signature_change_is_not_accepted
+
+new_case
+replace_once \
+  "src/ckp/bundle.py" \
+  '            if _file_signature(namespace_stat) != opened_signature:' \
+  '            if False and _file_signature(namespace_stat) != opened_signature:'
+expect_red \
+  "post-read namespace replacement accepted" \
+  tests/test_bundle_reader.py::test_post_read_namespace_replacement_is_not_accepted
+
+new_case
+replace_once \
+  "src/ckp/bundle.py" \
+  '            if not self._lineage_is_stable(lineage):' \
+  '            if False and not self._lineage_is_stable(lineage):'
+expect_red \
+  "post-read parent lineage replacement accepted" \
+  tests/test_bundle_reader.py::test_parent_replacement_after_file_read_is_not_accepted
+
+new_case
+replace_once \
+  "src/ckp/bundle.py" \
+  '            if expected is not None and before_signature != expected:' \
+  '            if False and expected is not None and before_signature != expected:'
+expect_red \
+  "capture accepts a stale member probe" \
+  tests/test_bundle_reader.py::test_capture_rejects_a_stale_member_probe
+
+new_case
+replace_once \
+  "src/ckp/bundle.py" \
+  '            if root_identity != expected.root_identity:' \
+  '            if False and root_identity != expected.root_identity:'
+expect_red \
+  "capture accepts a retargeted root symlink" \
+  tests/test_bundle_reader.py::test_capture_rejects_a_retargeted_root_symlink
+
+new_case
+replace_once \
+  "src/ckp/bundle.py" \
+  '                readable=all(
+                    item.refusal not in _BLOCKING_MEMBER_REFUSALS
+                    for item in expected.members
+                ),' \
+  '                readable=True,'
+expect_red \
+  "refused candidates publish a healthy partial snapshot" \
+  tests/test_bundle_reader.py::test_capture_marks_an_open_refusal_unreadable \
+  tests/test_gateway.py::test_hardlink_refusal_never_publishes_a_healthy_partial_snapshot
+
 echo "==> revision cache mutations"
+new_case
+replace_once \
+  "src/ckp/bundle.py" \
+  '                if before.token != after.token or live_commit != live_commit_after:' \
+  '                if False and (before.token != after.token or live_commit != live_commit_after):'
+expect_red \
+  "cache publishes after before and after probes disagree" \
+  tests/test_revision_cache.py::test_cache_does_not_publish_when_before_and_after_probes_disagree
+
 new_case
 replace_once \
   "src/ckp/bundle.py" \

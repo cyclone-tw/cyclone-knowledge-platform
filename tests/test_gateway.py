@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -109,6 +110,18 @@ def test_query_is_lexical_deterministic_bounded_and_cited(tmp_path: Path) -> Non
     )
 
 
+def test_snippet_offset_tracks_casefold_expansion(tmp_path: Path) -> None:
+    body = ("ß" * 400) + " needle " + ("z" * 400)
+    write_note(tmp_path, "public.md", title="Expansion", body=body)
+
+    response = _client(tmp_path).post("/query", json={"query": "needle"})
+
+    assert response.status_code == 200
+    snippet = response.json()["results"][0]["snippet"]
+    assert "needle" in snippet.casefold()
+    assert len(snippet) <= 320
+
+
 def test_query_excludes_every_non_public_or_undetermined_match(tmp_path: Path) -> None:
     write_note(tmp_path, "public.md", privacy="public", title="Needle public")
     write_note(tmp_path, "internal.md", privacy="internal", title="Needle internal")
@@ -147,6 +160,11 @@ def test_query_schema_rejects_policy_override_and_unbounded_inputs(
     assert client.post("/query", json={"query": " "}).status_code == 422
     assert client.get("/catalog", params={"limit": 101}).status_code == 422
 
+    trimmed = client.post("/query", json={"query": " " + ("x" * 256) + " "})
+    assert trimmed.status_code == 200
+    assert trimmed.json()["query"] == "x" * 256
+    assert client.post("/query", json={"query": "x" * 257}).status_code == 422
+
 
 def test_gateway_and_revision_use_the_same_snapshot(tmp_path: Path) -> None:
     write_note(tmp_path, "public.md", title="Kettle")
@@ -164,6 +182,31 @@ def test_bundle_unavailable_has_a_fixed_non_leaking_error(tmp_path: Path) -> Non
     response = _client(tmp_path / "absent").get("/catalog")
     assert response.status_code == 503
     assert response.json() == {"detail": "bundle-unavailable"}
+
+
+def test_hardlink_refusal_never_publishes_a_healthy_partial_snapshot(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundle"
+    root.mkdir()
+    write_note(root, "plain.md", title="Only safe member")
+    outside = write_note(tmp_path, "outside.md", title="Refused hardlink")
+    os.link(outside, root / "linked.md")
+    client = _client(root)
+
+    health = client.get("/health")
+    revision = client.get("/revision")
+    catalog = client.get("/catalog")
+    query = client.post("/query", json={"query": "safe"})
+
+    assert health.status_code == 503
+    assert health.json()["checks"]["bundle_readable"] is False
+    assert revision.status_code == 200
+    assert revision.json()["index_revision"] is None
+    assert revision.json()["sources"]["index_revision"] == "unknown"
+    assert catalog.status_code == query.status_code == 503
+    assert catalog.json() == query.json() == {"detail": "bundle-unavailable"}
+    assert "linked.md" not in catalog.text
 
 
 def test_service_layer_reuses_one_snapshot_even_if_cache_is_invalidated(

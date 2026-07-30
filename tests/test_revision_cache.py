@@ -5,8 +5,10 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 import ckp.bundle as bundle_module
-from ckp.bundle import AnchoredBundleReader, SnapshotCache
+from ckp.bundle import AnchoredBundleReader, SnapshotCache, SnapshotRaceError
 
 
 def _cache(root: Path) -> SnapshotCache:
@@ -94,3 +96,33 @@ def test_empty_bundle_has_an_honest_unavailable_snapshot(tmp_path: Path) -> None
     snapshot = _cache(tmp_path).get()
     assert snapshot.members == ()
     assert snapshot.index_revision is None
+
+
+def test_cache_does_not_publish_when_before_and_after_probes_disagree(
+    tmp_path: Path, monkeypatch
+) -> None:
+    (tmp_path / "a.md").write_bytes(b"stable bytes\n")
+    reader = AnchoredBundleReader(tmp_path)
+    original_probe = reader.probe
+    calls = 0
+
+    def alternating_probe(note_glob: str):
+        nonlocal calls
+        calls += 1
+        probe = original_probe(note_glob)
+        if calls % 2 == 0:
+            changed_descriptor = replace(
+                probe.descriptor,
+                refusal="synthetic-probe-change",
+            )
+            return replace(probe, descriptor=changed_descriptor)
+        return probe
+
+    monkeypatch.setattr(reader, "probe", alternating_probe)
+    cache = SnapshotCache(reader, "**/*.md", expected_profile_version=None)
+
+    with pytest.raises(SnapshotRaceError):
+        cache.get()
+
+    assert calls == 6
+    assert cache.rebuild_count == 0

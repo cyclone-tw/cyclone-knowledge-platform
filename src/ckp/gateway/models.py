@@ -19,9 +19,11 @@ class QueryRequest(BaseModel):
     query: str = Field(min_length=1, max_length=256)
     limit: int = Field(default=10, ge=1, le=20)
 
-    @field_validator("query")
+    @field_validator("query", mode="before")
     @classmethod
-    def query_must_not_be_whitespace(cls, value: str) -> str:
+    def strip_and_require_query_text(cls, value):
+        if not isinstance(value, str):
+            return value
         stripped = value.strip()
         if not stripped:
             raise ValueError("query must contain non-whitespace text")

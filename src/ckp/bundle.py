@@ -43,6 +43,21 @@ REFUSAL_HARDLINK = "multiple-hardlinks"
 REFUSAL_RACE = "member-changed-during-read"
 REFUSAL_UNREADABLE = "member-unreadable"
 
+# C1 deliberately excludes symlink and non-regular note candidates from the
+# digest. C3 preserves that compatibility. A hardlink is different: it looks
+# like an ordinary regular note on one copy but not another, so silently
+# excluding it would let two materially different bundles share a healthy
+# revision. Instability and unreadability are likewise snapshot blockers.
+_BLOCKING_MEMBER_REFUSALS = frozenset(
+    {
+        REFUSAL_HARDLINK,
+        REFUSAL_PATH,
+        REFUSAL_RACE,
+        REFUSAL_ROOT,
+        REFUSAL_UNREADABLE,
+    }
+)
+
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
 _ROOT_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
 _FILE_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -159,7 +174,7 @@ def _digest_key(relative_path: str) -> str:
 
 
 def _validate_relative_path(value: str) -> tuple[str, ...] | None:
-    if not value or "\x00" in value or "\\" in value:
+    if not value or "\x00" in value:
         return None
     path = PurePosixPath(value)
     if path.is_absolute():
@@ -494,7 +509,7 @@ class AnchoredBundleReader:
                     stamp_member.content if stamp_member is not None else None
                 ),
                 readable=all(
-                    item.refusal not in {REFUSAL_RACE, REFUSAL_UNREADABLE, REFUSAL_ROOT}
+                    item.refusal not in _BLOCKING_MEMBER_REFUSALS
                     for item in expected.members
                 ),
                 token=expected.token,
