@@ -11,6 +11,10 @@ dependencies = [
   # The Gateway (Epic #1 / C3) will serve from this same app, so the skeleton
   # uses the real framework rather than a stand-in that would be replaced.
   "fastapi>=0.115",
+  # Catalog parses only the source frontmatter it projects. A real YAML parser
+  # keeps quoted/list/scalar semantics honest; duplicate keys are rejected by
+  # the C3 strict loader rather than accepted with last-key-wins behavior.
+  "PyYAML>=6.0",
   "uvicorn>=0.30",
 ]
 

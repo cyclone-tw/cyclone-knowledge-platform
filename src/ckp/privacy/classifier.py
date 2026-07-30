@@ -37,8 +37,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, final
 
+from ckp.bundle import (
+    REFUSAL_RACE,
+    REFUSAL_UNREADABLE,
+    AnchoredBundleReader,
+    BundleMember,
+    MemberRefused,
+)
 from ckp.privacy.classes import PrivacyClass
-from ckp.revision import bundle_member_key
 
 #: Provisional reason codes for undetermined outcomes. Stable within this
 #: repo; renamed only via the Writer namespace mapping table, never ad hoc.
@@ -71,6 +77,11 @@ class Classified:
     #: recorded so a future second evidence source stays distinguishable
     #: (AGENTS.md §8 -- self-declared and derived evidence must not blur).
     source: str
+    #: Bind the classification to the exact immutable snapshot member when
+    #: one exists.  Legacy/custom classifiers may leave these absent; Catalog
+    #: requires both before it projects a result.
+    member_key: str | None = None
+    content_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +104,8 @@ class Classifier(Protocol):
     """What the gate requires. Anything classifying notes must look like this."""
 
     def classify(self, path: Path) -> Classification: ...
+
+    def classify_member(self, member: BundleMember) -> Classification: ...
 
 
 def _split_lines(text: str) -> list[str]:
@@ -127,30 +140,37 @@ def _frontmatter_lines(text: str) -> tuple[list[str] | None, str | None]:
 class FrontmatterClassifier:
     """Classify a note by the single privacy declaration in its frontmatter.
 
-    Constructed against a bundle root, which is **required**: this is a
-    separate read point from the C1 bundle walk and inherits none of its
-    containment, so it applies the same membership rule itself via
-    ``bundle_member_key`` -- one implementation, reused, so the two read
-    points cannot drift. That refuses symlinks at *every* component below the
-    root (a ``bundle/inbox -> /outside`` link must not pull external content
-    into classification), refuses paths that resolve outside the root, and
-    refuses non-regular files, while keeping C1's allowance for the root
-    itself being a symlink (mounting a checkout at a stable path is normal).
-
-    The remaining check-to-read race is the same known residue as C1's,
-    owned by the openat-anchored walk in C3 (Epic #1).
+    Constructed against a bundle root or the composition root's required
+    :class:`AnchoredBundleReader`. Path-based compatibility calls and C3
+    snapshot-member calls therefore share one containment policy: descendant
+    symlinks, traversal, non-regular files, hardlinks, and check/read
+    replacement are refused, while C1's root-symlink allowance is preserved.
     """
 
-    def __init__(self, bundle_root: Path) -> None:
-        self._bundle_root = bundle_root
+    def __init__(self, bundle_root: Path | AnchoredBundleReader) -> None:
+        # ``bundle_root`` remains the required public parameter name from C2.
+        # Passing the already composed reader lets the app share one explicit
+        # filesystem policy object across revision, Catalog, and privacy.
+        self._reader = (
+            bundle_root
+            if isinstance(bundle_root, AnchoredBundleReader)
+            else AnchoredBundleReader(bundle_root)
+        )
 
     def classify(self, path: Path) -> Classification:
-        if bundle_member_key(path, self._bundle_root) is None:
-            return Unclassified(reason=REASON_NOT_A_BUNDLE_MEMBER)
-        try:
-            raw = path.read_bytes()
-        except (OSError, ValueError):
-            return Unclassified(reason=REASON_UNREADABLE)
+        result = self._reader.read_path(path)
+        if isinstance(result, MemberRefused):
+            reason = (
+                REASON_UNREADABLE
+                if result.reason in {REFUSAL_RACE, REFUSAL_UNREADABLE}
+                else REASON_NOT_A_BUNDLE_MEMBER
+            )
+            return Unclassified(reason=reason)
+        return self.classify_member(result)
+
+    def classify_member(self, member: BundleMember) -> Classification:
+        """Classify bytes already captured in the immutable snapshot."""
+        raw = member.content
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
@@ -174,7 +194,12 @@ class FrontmatterClassifier:
             privacy = PrivacyClass(match.group("value"))
         except ValueError:
             return Unclassified(reason=REASON_PRIVACY_INVALID)
-        return Classified(privacy=privacy, source="frontmatter")
+        return Classified(
+            privacy=privacy,
+            source="frontmatter",
+            member_key=member.relative_path,
+            content_sha256=member.content_sha256,
+        )
 
 
 __all__ = [

@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import final
 
+from ckp.bundle import BundleMember
 from ckp.privacy.classes import PrivacyClass
 from ckp.privacy.classifier import Classified, Classifier, Unclassified
 
@@ -55,6 +56,8 @@ class _SealToken:
 
     path: Path
     privacy: PrivacyClass
+    member_key: str | None = None
+    content_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,8 @@ class Admitted:
 
     path: Path
     privacy: PrivacyClass
+    member_key: str | None = None
+    content_sha256: str | None = None
     _seal: _SealToken = field(repr=False, compare=False, kw_only=True)
 
     def __post_init__(self) -> None:
@@ -78,6 +83,8 @@ class Admitted:
             type(seal) is not _SealToken
             or seal.path != self.path
             or seal.privacy is not self.privacy
+            or seal.member_key != self.member_key
+            or seal.content_sha256 != self.content_sha256
         ):
             raise PrivacyPolicyError(
                 "Admitted can only be minted by PrivacyGate.admit; "
@@ -125,6 +132,19 @@ class PrivacyGate:
 
     def admit(self, path: Path) -> Verdict:
         outcome = self._classifier.classify(path)
+        return self._admit_outcome(path, outcome)
+
+    def admit_member(self, member: BundleMember) -> Verdict:
+        """Admit the exact bytes held by a bundle snapshot.
+
+        Catalog and Gateway use this path.  They never classify a path and
+        then read it again, so admission, metadata, snippets, and citation all
+        stay bound to the same content hash.
+        """
+        outcome = self._classifier.classify_member(member)
+        return self._admit_outcome(Path(member.relative_path), outcome)
+
+    def _admit_outcome(self, path: Path, outcome: Classified | Unclassified) -> Verdict:
         if isinstance(outcome, Unclassified):
             return Refused(path=path, reason=outcome.reason)
         assert isinstance(outcome, Classified)
@@ -139,7 +159,14 @@ class PrivacyGate:
         return Admitted(
             path=path,
             privacy=outcome.privacy,
-            _seal=_SealToken(path=path, privacy=outcome.privacy),
+            member_key=outcome.member_key,
+            content_sha256=outcome.content_sha256,
+            _seal=_SealToken(
+                path=path,
+                privacy=outcome.privacy,
+                member_key=outcome.member_key,
+                content_sha256=outcome.content_sha256,
+            ),
         )
 
     def partition(self, paths: Iterable[Path]) -> tuple[list[Admitted], list[Refused]]:

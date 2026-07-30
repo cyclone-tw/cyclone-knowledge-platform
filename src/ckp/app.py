@@ -1,4 +1,4 @@
-"""HTTP surface: ``/health`` and ``/revision``.
+"""HTTP surface: health/revision plus the read-only C3 Gateway.
 
 The walking skeleton deliberately uses the framework the Gateway will use, so
 later children extend this app rather than replace it. The API schema this
@@ -12,12 +12,32 @@ report healthy.
 
 from __future__ import annotations
 
-from fastapi import FastAPI
+from typing import Annotated
+
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from ckp.bundle import AnchoredBundleReader, SnapshotCache, SnapshotRaceError
+from ckp.catalog import (
+    CatalogBuilder,
+    CatalogUnavailableError,
+    PrivacyBindingError,
+)
 from ckp.config import Config, load_config
-from ckp.revision import API_VERSION, build_revision, bundle_is_readable
+from ckp.gateway import (
+    CatalogRequest,
+    CatalogResponse,
+    KnowledgeGateway,
+    QueryRequest,
+    QueryResponse,
+)
+from ckp.privacy import FrontmatterClassifier, PrivacyClass, PrivacyGate
+from ckp.revision import API_VERSION, build_revision
+
+# C6 authentication/scope does not exist yet.  The anonymous HTTP surface is
+# therefore public-only and the caller gets no request field that can widen it.
+PUBLIC_HTTP_ADMISSIBLE = frozenset({PrivacyClass.PUBLIC})
 
 
 class HealthChecks(BaseModel):
@@ -58,14 +78,31 @@ def create_app(config: Config | None = None) -> FastAPI:
     app = FastAPI(
         title="Cyclone Knowledge Platform",
         version=API_VERSION,
-        summary="Phase 3 walking skeleton: health and revision reporting.",
+        summary="Phase 3 read-only Catalog and Knowledge Gateway.",
     )
     app.state.config = resolved
+    reader = AnchoredBundleReader(resolved.bundle_root)
+    snapshot_cache = SnapshotCache(
+        reader,
+        resolved.bundle_note_glob,
+        resolved.profile_expected_version,
+    )
+    classifier = FrontmatterClassifier(reader)
+    privacy_gate = PrivacyGate(classifier, PUBLIC_HTTP_ADMISSIBLE)
+    catalog_builder = CatalogBuilder(privacy_gate)
+    gateway = KnowledgeGateway(snapshot_cache, catalog_builder, privacy_gate)
+    app.state.snapshot_cache = snapshot_cache
+    app.state.privacy_gate = privacy_gate
+    app.state.catalog_builder = catalog_builder
+    app.state.gateway = gateway
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> JSONResponse:
         cfg: Config = app.state.config
-        readable = bundle_is_readable(cfg.bundle_root, cfg.bundle_note_glob)
+        try:
+            readable = app.state.snapshot_cache.get().index_revision is not None
+        except SnapshotRaceError:
+            readable = False
         payload = HealthResponse(
             status="ok" if readable else "degraded",
             checks=HealthChecks(config_loaded=True, bundle_readable=readable),
@@ -80,6 +117,27 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.get("/revision", response_model=RevisionResponse)
     def revision() -> RevisionResponse:
-        return RevisionResponse(**build_revision(app.state.config).as_dict())
+        return RevisionResponse(
+            **build_revision(app.state.config, app.state.snapshot_cache).as_dict()
+        )
+
+    def unavailable() -> HTTPException:
+        return HTTPException(status_code=503, detail="bundle-unavailable")
+
+    @app.get("/catalog", response_model=CatalogResponse)
+    def catalog(
+        request: Annotated[CatalogRequest, Query()],
+    ) -> CatalogResponse:
+        try:
+            return app.state.gateway.catalog(request)
+        except (CatalogUnavailableError, PrivacyBindingError, SnapshotRaceError):
+            raise unavailable() from None
+
+    @app.post("/query", response_model=QueryResponse)
+    def query(request: QueryRequest) -> QueryResponse:
+        try:
+            return app.state.gateway.query(request)
+        except (CatalogUnavailableError, PrivacyBindingError, SnapshotRaceError):
+            raise unavailable() from None
 
     return app
