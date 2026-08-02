@@ -207,6 +207,9 @@ def create_app(
     def unavailable() -> HTTPException:
         return HTTPException(status_code=503, detail="bundle-unavailable")
 
+    def protected_unavailable() -> JSONResponse:
+        return rejection("bundle-unavailable", 503)
+
     @app.get("/catalog", response_model=CatalogResponse)
     def catalog(
         request: Annotated[CatalogRequest, Query()],
@@ -248,7 +251,7 @@ def create_app(
             PrivacyBindingError,
             SnapshotRaceError,
         ):
-            raise unavailable() from None
+            return protected_unavailable()
 
     @app.post("/scoped/query/{domain}", response_model=QueryResponse)
     def scoped_query(
@@ -275,7 +278,7 @@ def create_app(
             PrivacyBindingError,
             SnapshotRaceError,
         ):
-            raise unavailable() from None
+            return protected_unavailable()
 
     @app.post("/context/{domain}", response_model=ContextResponse)
     def context(
@@ -302,6 +305,6 @@ def create_app(
             PrivacyBindingError,
             SnapshotRaceError,
         ):
-            raise unavailable() from None
+            return protected_unavailable()
 
     return app

@@ -405,6 +405,19 @@ def test_policy_rejects_non_owner_personal_scope_sensitive_core_and_c6_writes() 
             policy.validate(grant)
 
 
+def test_policy_rejects_student_private_scope_at_grant_issuance() -> None:
+    with pytest.raises(GrantPolicyError) as caught:
+        GrantPolicy().validate(
+            _grant(
+                privacy_classes=frozenset(
+                    {PrivacyClass.PUBLIC, PrivacyClass.STUDENT_PRIVATE}
+                )
+            )
+        )
+
+    assert caught.value.code == "student-private-scope-denied"
+
+
 def test_report_capability_cannot_exist_without_read() -> None:
     with pytest.raises(GrantPolicyError, match="report-requires-read"):
         GrantPolicy().validate(

@@ -378,7 +378,7 @@ def test_scoped_read_requires_bundle_commit_but_public_c3_remains_available(
     public = client.get("/catalog")
 
     assert scoped.status_code == 503
-    assert scoped.json() == {"detail": "bundle-unavailable"}
+    _assert_sanitized_reject(scoped, "bundle-unavailable")
     assert public.status_code == 200
     assert public.json()["revision"]["bundle_commit"] is None
 
@@ -400,7 +400,7 @@ def test_duplicate_durable_id_makes_scoped_snapshot_unavailable(
     response = client.get("/scoped/catalog/finance", headers=_headers())
 
     assert response.status_code == 503
-    assert response.json() == {"detail": "bundle-unavailable"}
+    _assert_sanitized_reject(response, "bundle-unavailable")
     assert "DUPLICATE-ID-SENTINEL" not in response.text
 
 

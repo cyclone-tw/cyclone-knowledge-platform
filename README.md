@@ -58,6 +58,10 @@ bash scripts/smoke-container.sh
   returns a deterministic item-bounded context whose `utf8-bytes-v1` count is
   a conservative provider-neutral token upper bound.
 
+The task grant's `max_items` and token bound constrain `/context`; scoped
+Catalog and query keep their C3 request limits after the same auth, privacy and
+domain filters.
+
 The default app has no standing protected grants or domain bindings, so every
 protected call fails closed until a trusted composition injects both. C6 does
 not load production credentials, deploy a runtime, or connect a real Private

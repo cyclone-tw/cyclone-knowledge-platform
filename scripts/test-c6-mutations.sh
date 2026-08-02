@@ -84,6 +84,35 @@ expect_red() {
   echo "mutation red: $label"
 }
 
+expect_green() {
+  local label="$1"
+  shift
+  local log="$MUTATION_ROOT/baseline.log"
+  local status
+  set +e
+  (
+    cd "$CASE_DIR"
+    PYTHONDONTWRITEBYTECODE=1 \
+      PYTHONPATH="$CASE_DIR/src:$CASE_DIR/tests" \
+      "$PYTHON_BIN" -m pytest -p no:cacheprovider "$@"
+  ) >"$log" 2>&1
+  status=$?
+  set -e
+
+  if [ "$status" -ne 0 ]; then
+    echo "mutation baseline failed: $label" >&2
+    sed -n '1,220p' "$log" >&2
+    exit 1
+  fi
+  echo "mutation green: $label"
+}
+
+expect_green \
+  "pristine C6 auth, packer and scoped Gateway" \
+  tests/test_auth_scope.py \
+  tests/test_context_packer.py \
+  tests/test_scoped_gateway.py
+
 echo "==> control and caller-owned scope"
 new_case
 replace_once \
@@ -210,6 +239,17 @@ expect_red \
   "duplicate grant ID accepted" \
   tests/test_auth_scope.py::test_credential_digests_and_grant_ids_are_unambiguous
 
+new_case
+replace_once \
+  "src/ckp/auth/policy.py" \
+'        if PrivacyClass.STUDENT_PRIVATE in grant.privacy_classes:
+            raise GrantPolicyError("student-private-scope-denied")' \
+'        if False and PrivacyClass.STUDENT_PRIVATE in grant.privacy_classes:
+            raise GrantPolicyError("student-private-scope-denied")'
+expect_red \
+  "student-private grant scope accepted" \
+  tests/test_auth_scope.py::test_policy_rejects_student_private_scope_at_grant_issuance
+
 echo "==> privacy and domain ordering mutations"
 new_case
 replace_once \
@@ -320,6 +360,15 @@ replace_once \
 expect_red \
   "validation reject receipt echoes query body" \
   tests/test_scoped_gateway.py::test_request_cannot_add_scope_and_validation_receipt_does_not_echo_query
+
+new_case
+replace_once \
+  "src/ckp/app.py" \
+  '        return rejection("bundle-unavailable", 503)' \
+  '        return JSONResponse(status_code=503, content={"detail": "bundle-unavailable"})'
+expect_red \
+  "protected unavailable response bypasses sanitized receipt" \
+  tests/test_scoped_gateway.py::test_scoped_read_requires_bundle_commit_but_public_c3_remains_available
 
 echo "mutation: all $CASE_NUMBER C6 mutants turned red"
 echo "mutation: isolated artifacts retained at $MUTATION_ROOT"

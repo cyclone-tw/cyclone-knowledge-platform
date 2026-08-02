@@ -89,9 +89,12 @@ class BoundedContextPacker:
     """Pack ranked results under server-supplied item and byte-token caps."""
 
     def __init__(self, privacy_gate: PrivacyGate) -> None:
-        # The packer is itself a read projection. Requiring the exact gate
-        # chosen by ScopedCatalogSelector keeps red line R1 explicit at this
-        # boundary instead of treating "upstream probably filtered" as proof.
+        # Privacy admission is completed exactly once by
+        # ScopedCatalogSelector.select_with_gate. Query results no longer
+        # carry a privacy class, so the packer cannot reclassify them. Keeping
+        # the selector's gate as a required dependency makes that provenance
+        # explicit and arms the package-wiring convention; it is not a second
+        # enforcement point.
         if not isinstance(privacy_gate, PrivacyGate):
             raise TypeError("privacy_gate must be a PrivacyGate")
         self._privacy_gate = privacy_gate
