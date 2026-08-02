@@ -64,7 +64,7 @@ import sys
 
 # Written out rather than imported from ckp.revision: an oracle that reads the
 # value it is checking agrees with any value, including a wrong one.
-EXPECTED_API_VERSION = "0.1"
+EXPECTED_API_VERSION = "0.2"
 EXPECTED_PROFILE_VERSION = "cyclone-profile-v1"
 
 health = json.loads(sys.argv[1])
@@ -300,6 +300,235 @@ if failures:
         print(f"smoke: {line}", file=sys.stderr)
     sys.exit(1)
 print("smoke: public-only Catalog and cited Gateway query look right")
+PY
+
+# C6 scoped-read smoke inside the production image. Credentials, notes and
+# domain bindings exist only in this disposable process; the shipped app keeps
+# its deny-all default and no production Private bundle is connected.
+echo "==> C6 auth scope and bounded context smoke"
+docker run --rm -i --entrypoint python "$IMAGE" - <<'PY'
+import sys
+import tempfile
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+from ckp.auth import (
+    AccessActor,
+    AccessDenied,
+    ActorCredential,
+    Capability,
+    CredentialRegistry,
+    DomainBinding,
+    DomainRegistry,
+    GrantCredential,
+    GrantPolicy,
+    KnowledgeDomain,
+    ScopeGrant,
+)
+from ckp.bundle import AnchoredBundleReader, SnapshotCache
+from ckp.gateway.models import CatalogRequest, QueryRequest
+from ckp.gateway.scoped import OfflineQmdScope, ScopedCatalogSelector, ScopedKnowledgeGateway
+from ckp.packer import BoundedContextPacker, ContextRequest
+from ckp.privacy import FrontmatterClassifier, PrivacyClass
+
+NOW = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
+ACTOR_TOKEN = "synthetic-container-actor-codex"
+OTHER_ACTOR_TOKEN = "synthetic-container-actor-claude"
+GRANT_TOKEN = "synthetic-container-grant-finance"
+COMMIT = "c" * 40
+FINANCE_INTERNAL = "00000000-0000-7000-8000-000000000101"
+FINANCE_SENSITIVE = "00000000-0000-7000-8000-000000000102"
+CALENDAR_SENSITIVE = "00000000-0000-7000-8000-000000000103"
+STUDENT = "00000000-0000-7000-8000-000000000104"
+
+
+def note(root, name, *, privacy, note_id, title, body):
+    (root / name).write_text(
+        "---\n"
+        f"privacy: {privacy}\n"
+        f"id: {note_id}\n"
+        f"title: {title}\n"
+        "type: Concept\n"
+        "content_category: life\n"
+        "---\n\n"
+        f"# {title}\n\n{body}\n",
+        encoding="utf-8",
+    )
+
+
+def grant(*, expires_at):
+    return ScopeGrant(
+        grant_id="grant-synthetic-container-finance",
+        actor=AccessActor.CODEX,
+        task_id="task-synthetic-container-finance",
+        domains=frozenset({KnowledgeDomain.FINANCE}),
+        capabilities=frozenset({Capability.READ, Capability.REPORT_GENERATION}),
+        privacy_classes=frozenset(
+            {PrivacyClass.PUBLIC, PrivacyClass.INTERNAL, PrivacyClass.SENSITIVE}
+        ),
+        issued_by="human:cyclone",
+        issued_at=NOW - timedelta(minutes=5),
+        expires_at=expires_at,
+        max_items=2,
+        max_token_upper_bound=1024,
+    )
+
+
+def registry(scope):
+    return CredentialRegistry(
+        policy=GrantPolicy(),
+        actor_credentials=(
+            ActorCredential.from_plaintext(ACTOR_TOKEN, AccessActor.CODEX),
+            ActorCredential.from_plaintext(OTHER_ACTOR_TOKEN, AccessActor.CLAUDE_CODE),
+        ),
+        grant_credentials=(GrantCredential.from_plaintext(GRANT_TOKEN, scope),),
+        clock=lambda: NOW,
+    )
+
+
+failures = []
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    (root / ".bundle-commit").write_text(COMMIT + "\n", encoding="utf-8")
+    note(
+        root,
+        "finance-internal.md",
+        privacy="internal",
+        note_id=FINANCE_INTERNAL,
+        title="Synthetic Finance Internal",
+        body="c6needle synthetic amount TWD 1200 category utilities.",
+    )
+    note(
+        root,
+        "finance-sensitive.md",
+        privacy="sensitive",
+        note_id=FINANCE_SENSITIVE,
+        title="Synthetic Finance Sensitive",
+        body="c6needle synthetic allocation summary.",
+    )
+    note(
+        root,
+        "calendar-sensitive.md",
+        privacy="sensitive",
+        note_id=CALENDAR_SENSITIVE,
+        title="Synthetic Calendar Hidden",
+        body="c6needle CALENDAR-CROSS-DOMAIN-SENTINEL event synthetic-42.",
+    )
+    note(
+        root,
+        "student.md",
+        privacy="student-private",
+        note_id=STUDENT,
+        title="Invented Student Hidden",
+        body="c6needle STUDENT-PRIVATE-SENTINEL entirely invented fixture.",
+    )
+
+    reader = AnchoredBundleReader(root)
+    selector = ScopedCatalogSelector(
+        SnapshotCache(reader, "**/*.md", expected_profile_version=None),
+        FrontmatterClassifier(reader),
+        DomainRegistry(
+            (
+                DomainBinding(FINANCE_INTERNAL, KnowledgeDomain.FINANCE),
+                DomainBinding(FINANCE_SENSITIVE, KnowledgeDomain.FINANCE),
+                DomainBinding(
+                    CALENDAR_SENSITIVE, KnowledgeDomain.CALENDAR_CONTEXT
+                ),
+                DomainBinding(STUDENT, KnowledgeDomain.FINANCE),
+            )
+        ),
+    )
+    gateway = ScopedKnowledgeGateway(selector, BoundedContextPacker)
+    credentials = registry(grant(expires_at=NOW + timedelta(hours=1)))
+    offline = OfflineQmdScope(selector, credentials)
+    access = credentials.resolve(
+        actor_credential=ACTOR_TOKEN,
+        grant_credential=GRANT_TOKEN,
+        requested_domain=KnowledgeDomain.FINANCE,
+        required_capabilities=frozenset(
+            {Capability.READ, Capability.REPORT_GENERATION}
+        ),
+    )
+    catalog = gateway.catalog(access, CatalogRequest(limit=100))
+    query = gateway.query(access, QueryRequest(query="c6needle", limit=20))
+    context = gateway.context(access, ContextRequest(query="c6needle"))
+    plan = offline.plan(
+        actor_credential=ACTOR_TOKEN,
+        grant_credential=GRANT_TOKEN,
+        domain=KnowledgeDomain.FINANCE,
+    )
+
+    if catalog.total != 2 or query.total != 2:
+        failures.append("scoped counts did not contain exactly two finance notes")
+    rendered = context.context + repr(catalog) + repr(query)
+    for forbidden in (
+        "CALENDAR-CROSS-DOMAIN-SENTINEL",
+        "STUDENT-PRIVATE-SENTINEL",
+    ):
+        if forbidden in rendered:
+            failures.append(f"scoped output leaked {forbidden}")
+    if context.token_upper_bound_used > context.token_upper_bound_limit:
+        failures.append("context exceeded its token upper bound")
+    if len(context.items) > context.item_limit:
+        failures.append("context exceeded its item bound")
+    for item in context.items:
+        if item.citation.bundle_commit != COMMIT:
+            failures.append("context item lacks the synthetic bundle commit")
+        if item.citation.index_revision != context.revision.index_revision:
+            failures.append("context citation revision drifted")
+    if set(plan.paths) != {item.citation.path for item in catalog.items}:
+        failures.append("offline QMD scope differs from Gateway scope")
+
+    for actor_token, domain, expected in (
+        (OTHER_ACTOR_TOKEN, KnowledgeDomain.FINANCE, "wrong-actor"),
+        (ACTOR_TOKEN, KnowledgeDomain.CALENDAR_CONTEXT, "domain-denied"),
+    ):
+        try:
+            credentials.resolve(
+                actor_credential=actor_token,
+                grant_credential=GRANT_TOKEN,
+                requested_domain=domain,
+                required_capabilities=frozenset({Capability.READ}),
+            )
+        except AccessDenied as error:
+            if error.code != expected:
+                failures.append(f"expected {expected}, got {error.code}")
+        else:
+            failures.append(f"{expected} case was admitted")
+
+    expired = registry(
+        ScopeGrant(
+            grant_id="grant-synthetic-container-expired",
+            actor=AccessActor.CODEX,
+            task_id="task-synthetic-container-expired",
+            domains=frozenset({KnowledgeDomain.FINANCE}),
+            capabilities=frozenset({Capability.READ}),
+            privacy_classes=frozenset({PrivacyClass.INTERNAL}),
+            issued_by="human:cyclone",
+            issued_at=NOW - timedelta(hours=2),
+            expires_at=NOW - timedelta(hours=1),
+            max_items=1,
+            max_token_upper_bound=512,
+        )
+    )
+    try:
+        expired.resolve(
+            actor_credential=ACTOR_TOKEN,
+            grant_credential=GRANT_TOKEN,
+            requested_domain=KnowledgeDomain.FINANCE,
+            required_capabilities=frozenset({Capability.READ}),
+        )
+    except AccessDenied as error:
+        if error.code != "scope-expired":
+            failures.append(f"expected scope-expired, got {error.code}")
+    else:
+        failures.append("expired scope was admitted")
+
+if failures:
+    for line in failures:
+        print(f"smoke: {line}", file=sys.stderr)
+    sys.exit(1)
+print("smoke: C6 scope, privacy, context bounds, citations and QMD parity look right")
 PY
 
 # The runtime path above must work from production dependencies alone.

@@ -12,12 +12,24 @@ report healthy.
 
 from __future__ import annotations
 
+import secrets
+from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from ckp.auth import (
+    AccessContext,
+    AccessDenied,
+    Capability,
+    CredentialRegistry,
+    DomainPolicyError,
+    DomainRegistry,
+    KnowledgeDomain,
+)
 from ckp.bundle import AnchoredBundleReader, SnapshotCache, SnapshotRaceError
 from ckp.catalog import (
     CatalogBuilder,
@@ -32,12 +44,20 @@ from ckp.gateway import (
     QueryRequest,
     QueryResponse,
 )
+from ckp.gateway.scoped import (
+    OfflineQmdScope,
+    ScopedCatalogSelector,
+    ScopedKnowledgeGateway,
+)
+from ckp.packer import BoundedContextPacker, ContextRequest, ContextResponse
 from ckp.privacy import FrontmatterClassifier, PrivacyClass, PrivacyGate
 from ckp.revision import API_VERSION, build_revision
 
-# C6 authentication/scope does not exist yet.  The anonymous HTTP surface is
-# therefore public-only and the caller gets no request field that can widen it.
+# C6 adds separate protected routes. The anonymous C3 surface stays
+# public-only, and no caller field can widen that fixed policy.
 PUBLIC_HTTP_ADMISSIBLE = frozenset({PrivacyClass.PUBLIC})
+_READ = frozenset({Capability.READ})
+_READ_AND_REPORT = frozenset({Capability.READ, Capability.REPORT_GENERATION})
 
 
 class HealthChecks(BaseModel):
@@ -72,13 +92,18 @@ class RevisionResponse(BaseModel):
     )
 
 
-def create_app(config: Config | None = None) -> FastAPI:
+def create_app(
+    config: Config | None = None,
+    *,
+    credential_registry: CredentialRegistry | None = None,
+    domain_registry: DomainRegistry | None = None,
+) -> FastAPI:
     resolved = load_config() if config is None else config
 
     app = FastAPI(
         title="Cyclone Knowledge Platform",
         version=API_VERSION,
-        summary="Phase 3 read-only Catalog and Knowledge Gateway.",
+        summary="Phase 3 public and task-scoped read-only Knowledge Gateway.",
     )
     app.state.config = resolved
     reader = AnchoredBundleReader(resolved.bundle_root)
@@ -91,10 +116,68 @@ def create_app(config: Config | None = None) -> FastAPI:
     privacy_gate = PrivacyGate(classifier, PUBLIC_HTTP_ADMISSIBLE)
     catalog_builder = CatalogBuilder(privacy_gate)
     gateway = KnowledgeGateway(snapshot_cache, catalog_builder, privacy_gate)
+    resolved_credentials = credential_registry or CredentialRegistry.deny_all(
+        lambda: datetime.now(UTC)
+    )
+    resolved_domains = domain_registry or DomainRegistry(())
+    scoped_selector = ScopedCatalogSelector(
+        snapshot_cache,
+        classifier,
+        resolved_domains,
+    )
+    scoped_gateway = ScopedKnowledgeGateway(
+        scoped_selector,
+        BoundedContextPacker,
+    )
+    offline_qmd_scope = OfflineQmdScope(scoped_selector, resolved_credentials)
     app.state.snapshot_cache = snapshot_cache
     app.state.privacy_gate = privacy_gate
     app.state.catalog_builder = catalog_builder
     app.state.gateway = gateway
+    app.state.credential_registry = resolved_credentials
+    app.state.domain_registry = resolved_domains
+    app.state.scoped_selector = scoped_selector
+    app.state.scoped_gateway = scoped_gateway
+    app.state.offline_qmd_scope = offline_qmd_scope
+
+    def rejection(code: str, status_code: int) -> JSONResponse:
+        # Server-generated ID plus a stable code is the whole reject receipt.
+        # Never serialize exceptions, request bodies, headers, or note metadata.
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "request_id": secrets.token_hex(16),
+                "status": "rejected",
+                "code": code,
+            },
+        )
+
+    @app.exception_handler(AccessDenied)
+    async def access_denied_handler(
+        _request: Request, error: AccessDenied
+    ) -> JSONResponse:
+        return rejection(error.code, error.http_status)
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_handler(
+        _request: Request, _error: RequestValidationError
+    ) -> JSONResponse:
+        # FastAPI's default detail includes rejected input values. A query can
+        # itself be sensitive, so C6 returns a body-free machine receipt.
+        return rejection("invalid-request", 422)
+
+    def resolve_access(
+        domain: KnowledgeDomain,
+        actor_credential: str | None,
+        grant_credential: str | None,
+        required_capabilities: frozenset[Capability],
+    ) -> AccessContext:
+        return resolved_credentials.resolve(
+            actor_credential=actor_credential,
+            grant_credential=grant_credential,
+            requested_domain=domain,
+            required_capabilities=required_capabilities,
+        )
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> JSONResponse:
@@ -138,6 +221,87 @@ def create_app(config: Config | None = None) -> FastAPI:
         try:
             return app.state.gateway.query(request)
         except (CatalogUnavailableError, PrivacyBindingError, SnapshotRaceError):
+            raise unavailable() from None
+
+    @app.get("/scoped/catalog/{domain}", response_model=CatalogResponse)
+    def scoped_catalog(
+        domain: KnowledgeDomain,
+        request: Annotated[CatalogRequest, Query()],
+        actor_credential: Annotated[
+            str | None, Header(alias="X-CKP-Actor-Credential")
+        ] = None,
+        grant_credential: Annotated[
+            str | None, Header(alias="X-CKP-Grant-Credential")
+        ] = None,
+    ) -> CatalogResponse:
+        context = resolve_access(
+            domain,
+            actor_credential,
+            grant_credential,
+            _READ,
+        )
+        try:
+            return app.state.scoped_gateway.catalog(context, request)
+        except (
+            CatalogUnavailableError,
+            DomainPolicyError,
+            PrivacyBindingError,
+            SnapshotRaceError,
+        ):
+            raise unavailable() from None
+
+    @app.post("/scoped/query/{domain}", response_model=QueryResponse)
+    def scoped_query(
+        domain: KnowledgeDomain,
+        request: QueryRequest,
+        actor_credential: Annotated[
+            str | None, Header(alias="X-CKP-Actor-Credential")
+        ] = None,
+        grant_credential: Annotated[
+            str | None, Header(alias="X-CKP-Grant-Credential")
+        ] = None,
+    ) -> QueryResponse:
+        context = resolve_access(
+            domain,
+            actor_credential,
+            grant_credential,
+            _READ,
+        )
+        try:
+            return app.state.scoped_gateway.query(context, request)
+        except (
+            CatalogUnavailableError,
+            DomainPolicyError,
+            PrivacyBindingError,
+            SnapshotRaceError,
+        ):
+            raise unavailable() from None
+
+    @app.post("/context/{domain}", response_model=ContextResponse)
+    def context(
+        domain: KnowledgeDomain,
+        request: ContextRequest,
+        actor_credential: Annotated[
+            str | None, Header(alias="X-CKP-Actor-Credential")
+        ] = None,
+        grant_credential: Annotated[
+            str | None, Header(alias="X-CKP-Grant-Credential")
+        ] = None,
+    ) -> ContextResponse:
+        access = resolve_access(
+            domain,
+            actor_credential,
+            grant_credential,
+            _READ_AND_REPORT,
+        )
+        try:
+            return app.state.scoped_gateway.context(access, request)
+        except (
+            CatalogUnavailableError,
+            DomainPolicyError,
+            PrivacyBindingError,
+            SnapshotRaceError,
+        ):
             raise unavailable() from None
 
     return app

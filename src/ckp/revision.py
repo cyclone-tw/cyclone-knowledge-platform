@@ -27,9 +27,9 @@ from ckp.bundle import (
 )
 from ckp.config import Config
 
-#: The API contract version consumers pin.  C3 adds endpoints without changing
-#: the already published C1 response contracts, so the version stays 0.1.
-API_VERSION = "0.1"
+#: The API contract version consumers pin. C6 publishes the first protected
+#: scope and bounded-context schemas, an additive contract revision from C3.
+API_VERSION = "0.2"
 
 
 @dataclass(frozen=True)

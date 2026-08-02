@@ -30,7 +30,7 @@ CONTRACT_FIELDS = ("profile_version", "api_version", "bundle_commit", "index_rev
 #: Written out rather than imported. Asserting against ``API_VERSION`` only
 #: proves the app and the constant agree, so any wrong value would agree with
 #: itself and pass. Changing the contract version must mean changing this line.
-EXPECTED_API_VERSION = "0.1"
+EXPECTED_API_VERSION = "0.2"
 
 
 @pytest.fixture
@@ -209,7 +209,7 @@ def test_health_is_degraded_when_a_note_cannot_be_read(tmp_path) -> None:
 def test_api_version_is_bound_to_the_constant_not_copied(monkeypatch) -> None:
     """Pinning the value is not the same as pinning the wiring.
 
-    `FastAPI(version="0.1")` hardcoded would satisfy every other assertion
+    `FastAPI(version="0.2")` hardcoded would satisfy every other assertion
     here, because the literal and the constant currently agree. Move the
     constant to a sentinel and everything downstream must move with it.
     """

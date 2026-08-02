@@ -30,6 +30,71 @@ class GatewayPolicyError(ValueError):
     """The composition root supplied inconsistent privacy dependencies."""
 
 
+def catalog_response(
+    catalog: CatalogSnapshot,
+    request: CatalogRequest,
+) -> CatalogResponse:
+    """Project one already privacy-gated Catalog into the public schema."""
+    # Admission already happened in CatalogBuilder. Metadata filtering,
+    # count, facets, and only then pagination preserve privacy-before-
+    # aggregation from the frozen sink Decision.
+    filtered = tuple(
+        entry
+        for entry in catalog.entries
+        if request.type is None or entry.type == request.type
+    )
+    total = len(filtered)
+    page = filtered[request.offset : request.offset + request.limit]
+    next_offset = (
+        request.offset + request.limit
+        if request.offset + request.limit < total
+        else None
+    )
+    return CatalogResponse(
+        revision=_snapshot_ref(catalog),
+        items=[_catalog_item(entry) for entry in page],
+        total=total,
+        facets=CatalogFacets(
+            types=_facet([entry.type for entry in filtered]),
+            content_categories=_facet([entry.content_category for entry in filtered]),
+        ),
+        next_offset=next_offset,
+    )
+
+
+def query_response(
+    catalog: CatalogSnapshot,
+    request: QueryRequest,
+) -> QueryResponse:
+    """Rank one already privacy-gated Catalog and add bound citations."""
+    tokens = _tokens(request.query)
+    scored = [
+        (score, entry)
+        for entry in catalog.entries
+        if (score := _score(entry, tokens)) > 0
+    ]
+    scored.sort(key=lambda item: (-item[0], item[1].concept_id))
+    total = len(scored)
+    results = [
+        QueryResultResponse(
+            concept_id=entry.concept_id,
+            id=entry.id,
+            title=entry.title,
+            type=entry.type,
+            score=score,
+            snippet=_snippet(entry.body, tokens),
+            citation=_citation(entry),
+        )
+        for score, entry in scored[: request.limit]
+    ]
+    return QueryResponse(
+        revision=_snapshot_ref(catalog),
+        query=request.query,
+        results=results,
+        total=total,
+    )
+
+
 def _normalise(value: str) -> str:
     return unicodedata.normalize("NFKC", value).casefold()
 
@@ -171,33 +236,7 @@ class KnowledgeGateway:
             else CatalogRequest(limit=limit, offset=offset or 0, type=note_type)
         )
         catalog = self._catalog()
-        # Admission already happened in CatalogBuilder.  Metadata filtering,
-        # count, facets, and only then pagination preserve privacy-before-
-        # aggregation from the frozen sink Decision.
-        filtered = tuple(
-            entry
-            for entry in catalog.entries
-            if request.type is None or entry.type == request.type
-        )
-        total = len(filtered)
-        page = filtered[request.offset : request.offset + request.limit]
-        next_offset = (
-            request.offset + request.limit
-            if request.offset + request.limit < total
-            else None
-        )
-        return CatalogResponse(
-            revision=_snapshot_ref(catalog),
-            items=[_catalog_item(entry) for entry in page],
-            total=total,
-            facets=CatalogFacets(
-                types=_facet([entry.type for entry in filtered]),
-                content_categories=_facet(
-                    [entry.content_category for entry in filtered]
-                ),
-            ),
-            next_offset=next_offset,
-        )
+        return catalog_response(catalog, request)
 
     def query(
         self, query: str | QueryRequest, limit: int | None = None
@@ -207,33 +246,13 @@ class KnowledgeGateway:
             if isinstance(query, QueryRequest)
             else QueryRequest(query=query, limit=limit or 10)
         )
-        tokens = _tokens(request.query)
         catalog = self._catalog()
-        scored = [
-            (score, entry)
-            for entry in catalog.entries
-            if (score := _score(entry, tokens)) > 0
-        ]
-        scored.sort(key=lambda item: (-item[0], item[1].concept_id))
-        total = len(scored)
-        results = [
-            QueryResultResponse(
-                concept_id=entry.concept_id,
-                id=entry.id,
-                title=entry.title,
-                type=entry.type,
-                score=score,
-                snippet=_snippet(entry.body, tokens),
-                citation=_citation(entry),
-            )
-            for score, entry in scored[: request.limit]
-        ]
-        return QueryResponse(
-            revision=_snapshot_ref(catalog),
-            query=request.query,
-            results=results,
-            total=total,
-        )
+        return query_response(catalog, request)
 
 
-__all__ = ["GatewayPolicyError", "KnowledgeGateway"]
+__all__ = [
+    "GatewayPolicyError",
+    "KnowledgeGateway",
+    "catalog_response",
+    "query_response",
+]
