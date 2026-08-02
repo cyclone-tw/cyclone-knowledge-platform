@@ -24,8 +24,9 @@ private editable copy of the other's contract.
 
 ## Status
 
-Phase 3 walking skeleton (child C1). See issue #1 (platform Epic) for the
-child map, dependency order and file ownership.
+Phase 3 C6: public-only C3 reads remain available, while `internal` and
+`sensitive` reads require an expiring server-owned task grant. See issue #1
+(platform Epic) for the child map, dependency order and file ownership.
 
 ## Quick start
 
@@ -44,6 +45,27 @@ Container, including the endpoint smoke test:
 ```bash
 bash scripts/smoke-container.sh
 ```
+
+## Read surfaces
+
+- `/catalog` and `/query` are the anonymous C3 surface and always remain
+  `public`-only.
+- `/scoped/catalog/{domain}` and `/scoped/query/{domain}` require separate
+  opaque actor and task-grant credentials. Actor, task, domain, capability,
+  privacy classes, expiry and limits resolve from server state; request JSON
+  cannot provide them.
+- `/context/{domain}` additionally requires report-generation capability and
+  returns a deterministic item-bounded context whose `utf8-bytes-v1` count is
+  a conservative provider-neutral token upper bound.
+
+The task grant's `max_items` and token bound constrain `/context`; scoped
+Catalog and query keep their C3 request limits after the same auth, privacy and
+domain filters.
+
+The default app has no standing protected grants or domain bindings, so every
+protected call fails closed until a trusted composition injects both. C6 does
+not load production credentials, deploy a runtime, or connect a real Private
+bundle.
 
 ## Revision reporting
 
@@ -65,12 +87,9 @@ absent evidence reports as `null`, because a placeholder would make a broken
 deployment look identical to a healthy one.
 
 `/health` answers by running the same computation, so it cannot report ok on a
-bundle `/revision` finds nothing in. Notes reached through a symlink are not
-bundle members: a link out would make the revision depend on state the bundle
-does not carry. A hardlink to a file outside the bundle is indistinguishable
-at the path layer and remains possible; closing that, and the window between
-checking a path and reading it, needs an openat-anchored walk and belongs with
-the Gateway child.
+bundle `/revision` finds nothing in. The C3 anchored reader rejects symlinks,
+hardlinks and snapshot races before privacy classification, Catalog projection
+or citation can consume the bytes.
 
 ## Configuration
 
