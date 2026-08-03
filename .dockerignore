@@ -1,5 +1,5 @@
-# Keep the build context to what the package needs. The image has no git, so
-# bundle_commit comes from the BUNDLE_COMMIT build arg instead.
+# Keep the build context to what the package and disposable C7 smoke need.
+# The final runtime has no git, so bundle_commit still comes from the build arg.
 .git
 .github
 .venv
@@ -8,7 +8,16 @@ __pycache__
 *.egg-info
 .pytest_cache
 .ruff_cache
-tests
+tests/*
+!tests/conftest.py
+!tests/writer_fixtures.py
+!tests/test_c7_contract.py
+!tests/test_writer_errors.py
+!tests/test_writer_identity.py
+!tests/test_writer_models.py
+!tests/test_writer_target.py
+!tests/test_writer_transaction.py
+!tests/test_writer_validation.py
 scripts
 config
 AGENTS.md
