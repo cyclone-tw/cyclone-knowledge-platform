@@ -5,7 +5,7 @@
 # developer's home directory. Host-specific values arrive as environment
 # variables at run time.
 
-FROM python:3.12-slim
+FROM python:3.12-slim AS runtime
 
 # Build-time provenance. CI passes the repo commit. Without it the image
 # reports an unknown bundle_commit rather than a fabricated one -- git is not
@@ -37,3 +37,19 @@ USER ckp
 
 EXPOSE 8080
 CMD ["python", "-m", "ckp"]
+
+# Disposable Linux-only C7 verification stage. The shipped runtime above
+# intentionally has neither Git nor dev dependencies; this stage adds them
+# only so CI can exercise isolated synthetic Git transactions in a container.
+FROM runtime AS c7-writer-smoke
+
+USER root
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends git
+COPY tests/ ./tests/
+RUN python -m pip install --no-cache-dir --disable-pip-version-check ".[dev]"
+USER ckp
+
+# Keep an ordinary `docker build` on the production runtime, not the C7 test
+# stage. `scripts/smoke-container.sh` selects c7-writer-smoke explicitly.
+FROM runtime AS final

@@ -11,6 +11,7 @@
 set -euo pipefail
 
 IMAGE="${IMAGE:-ckp:smoke}"
+WRITER_IMAGE="${WRITER_IMAGE:-ckp:c7-writer-smoke}"
 PORT="${PORT:-8080}"
 NAME="${NAME:-ckp-smoke}"
 # `-` not `:-` on purpose: an explicitly empty BUNDLE_COMMIT means "build
@@ -544,3 +545,25 @@ if unexpected:
     sys.exit(1)
 print("smoke: Gateway runtime uses no dev dependency")
 PY
+
+# C7 Writer smoke runs in a separate disposable stage. It contains Git and
+# the synthetic tests, while the final runtime image above remains read-only
+# and free of dev dependencies. Every fixture is generated under container
+# TMPDIR; no Wiki, Private, runtime state, or production credential is mounted.
+echo "==> C7 synthetic Git Writer smoke"
+docker build \
+  --quiet \
+  --target c7-writer-smoke \
+  --build-arg BUNDLE_COMMIT="$BUNDLE_COMMIT" \
+  -t "$WRITER_IMAGE" \
+  .
+docker run --rm --entrypoint python "$WRITER_IMAGE" \
+  -m pytest -q \
+  tests/test_writer_models.py \
+  tests/test_writer_errors.py \
+  tests/test_writer_identity.py \
+  tests/test_writer_target.py \
+  tests/test_writer_validation.py \
+  tests/test_writer_transaction.py \
+  tests/test_c7_contract.py
+echo "smoke: C7 synthetic Writer transaction matrix looks right"
