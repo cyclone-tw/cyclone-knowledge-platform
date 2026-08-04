@@ -197,15 +197,22 @@ class OutboxStore:
     def _record_holding_key(self, idempotency_hash: str) -> str | None:
         """The name of the live record bound to this key, if any exists.
 
-        Consulted only when the derived index has no answer. Records that
-        cannot be parsed are skipped here -- recovery quarantines them, and
-        their key binding dies with them.
+        Consulted only when the derived index has no answer. Deterministic
+        failures (a stray filename, a corrupt or unknown-version record) are
+        skipped -- recovery quarantines them and their key binding dies with
+        them. A *transient* storage failure is different: an unreadable
+        record may be the true key holder, so the lookup fails closed
+        instead of concluding the key is free.
         """
         for path in sorted(self._records.glob("*" + _RECORD_SUFFIX)):
             name = path.name.removesuffix(_RECORD_SUFFIX)
+            if _RECORD_NAME.fullmatch(name) is None:
+                continue
             try:
                 record = self.load(name)
-            except OutboxRefusal:
+            except OutboxRefusal as refusal:
+                if refusal.code is OutboxErrorCode.STORAGE_FAILED:
+                    raise
                 continue
             if record is not None and record.idempotency_hash == idempotency_hash:
                 return name
@@ -214,16 +221,24 @@ class OutboxStore:
     def scan(self) -> list[tuple[str, OutboxRecord]]:
         """Every parseable active record in deterministic name order.
 
-        Unparseable or version-unknown files are moved to quarantine as raw
-        audit bytes (metadata and ciphertext only, by construction) and are
-        never offered for replay.
+        Stray filenames and unparseable or version-unknown files are moved
+        to quarantine as raw audit bytes (metadata and ciphertext only, by
+        construction) and are never offered for replay. Transient storage
+        failures are not quarantine evidence: a healthy record must never be
+        pulled out of the replay path because one read hit an I/O error, so
+        those fail the whole pass instead.
         """
         results: list[tuple[str, OutboxRecord]] = []
         for path in sorted(self._records.glob("*" + _RECORD_SUFFIX)):
             name = path.name.removesuffix(_RECORD_SUFFIX)
+            if _RECORD_NAME.fullmatch(name) is None:
+                self._quarantine_raw(path)
+                continue
             try:
                 record = self.load(name)
-            except OutboxRefusal:
+            except OutboxRefusal as refusal:
+                if refusal.code is OutboxErrorCode.STORAGE_FAILED:
+                    raise
                 self._quarantine_raw(path)
                 continue
             if record is not None:
@@ -250,10 +265,19 @@ class OutboxStore:
         except OutboxRefusal:
             # The record may already be visible (rename done, directory
             # fsync failed). The refusal must match the visible state, so
-            # roll the create back before reporting it. A crash inside this
-            # narrow window is the irreducible filesystem residue.
-            with contextlib.suppress(OSError):
-                path.unlink(missing_ok=True)
+            # move the unproven record out of the replay path with one
+            # atomic rename into quarantine -- terminal, never replayed --
+            # rather than an unlink whose own failure would let recovery
+            # re-index it. If even the rename fails the outcome is
+            # indeterminate, which is the honest at-least-once answer: the
+            # caller retries with the same idempotency key and converges
+            # via dedup or conflict.
+            if path.exists():
+                with contextlib.suppress(OutboxRefusal):
+                    self._quarantine_raw(path)
+                with contextlib.suppress(OSError):
+                    self._fsync_directory(self._records)
+                    self._fsync_directory(self._quarantine)
             self._drop_index(record.idempotency_hash)
             raise
 

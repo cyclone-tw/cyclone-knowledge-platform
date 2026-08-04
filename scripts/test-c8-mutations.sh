@@ -342,8 +342,12 @@ expect_red \
 new_case
 replace_once \
   "src/ckp/outbox/store.py" \
-  '                path.unlink(missing_ok=True)' \
-  '                pass  # mutant keeps the unprovable record'
+  '            if path.exists():
+                with contextlib.suppress(OutboxRefusal):
+                    self._quarantine_raw(path)' \
+  '            if False and path.exists():
+                with contextlib.suppress(OutboxRefusal):
+                    self._quarantine_raw(path)'
 expect_red \
   "unprovable record write survives its refusal" \
   tests/test_outbox_store.py::test_unprovable_record_write_is_rolled_back_not_enqueued
@@ -351,8 +355,10 @@ expect_red \
 new_case
 replace_once \
   "src/ckp/outbox/store.py" \
-  '        if _RECORD_NAME.fullmatch(name) is None:' \
-  '        if False and _RECORD_NAME.fullmatch(name) is None:'
+'    def load(self, name: str) -> OutboxRecord | None:
+        if _RECORD_NAME.fullmatch(name) is None:' \
+'    def load(self, name: str) -> OutboxRecord | None:
+        if False and _RECORD_NAME.fullmatch(name) is None:'
 expect_red \
   "record-name shape guard removed from load" \
   tests/test_outbox_store.py::test_index_content_is_never_turned_into_a_path
@@ -380,6 +386,48 @@ replace_once \
 expect_red \
   "provider-minted refusal chain passes through" \
   tests/test_outbox_crypto.py::test_provider_minted_refusals_are_reminted_without_chain
+
+echo "==> review round-3 hardening guards"
+new_case
+replace_once \
+  "src/ckp/outbox/store.py" \
+'            except OutboxRefusal as refusal:
+                if refusal.code is OutboxErrorCode.STORAGE_FAILED:
+                    raise
+                continue' \
+'            except OutboxRefusal:
+                continue'
+expect_red \
+  "transient read failures free a bound key" \
+  tests/test_outbox_store.py::test_transient_read_failures_never_free_a_bound_key
+
+new_case
+replace_once \
+  "src/ckp/outbox/store.py" \
+'            except OutboxRefusal as refusal:
+                if refusal.code is OutboxErrorCode.STORAGE_FAILED:
+                    raise
+                self._quarantine_raw(path)
+                continue' \
+'            except OutboxRefusal:
+                self._quarantine_raw(path)
+                continue'
+expect_red \
+  "transient read failures evict healthy records to quarantine" \
+  tests/test_outbox_store.py::test_scan_does_not_quarantine_on_transient_failures
+
+new_case
+replace_once \
+  "src/ckp/outbox/store.py" \
+'            if _RECORD_NAME.fullmatch(name) is None:
+                self._quarantine_raw(path)
+                continue' \
+'            if False and _RECORD_NAME.fullmatch(name) is None:
+                self._quarantine_raw(path)
+                continue'
+expect_red \
+  "stray filenames break the scan instead of being quarantined" \
+  tests/test_outbox_store.py::test_stray_filenames_are_quarantined_without_failing_the_pass
 
 echo "==> receipt and namespace guards"
 new_case

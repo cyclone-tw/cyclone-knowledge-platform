@@ -303,10 +303,83 @@ def test_unprovable_record_write_is_rolled_back_not_enqueued(
         store.persist_new(record)
     monkeypatch.undo()
 
+    # The unproven record was parked in quarantine by one atomic rename,
+    # so no recovery pass can ever re-index it into the replay path.
+    assert not list((tmp_path / "outbox-state" / "records").iterdir())
+    assert len(list((tmp_path / "outbox-state" / "quarantine").iterdir())) == 1
     restarted = _store(tmp_path)
     restarted.recover()
     assert restarted.scan() == []
     assert not list((tmp_path / "outbox-state" / "idempotency").iterdir())
+
+    # And the caller's same-key retry converges: the key is free again.
+    restarted.persist_new(record)
+    assert (
+        restarted.find_for_enqueue(record.operation_id, record.idempotency_hash)
+        == record
+    )
+
+
+def test_transient_read_failures_never_free_a_bound_key(tmp_path: Path) -> None:
+    """An unreadable record may be the true key holder; fail closed."""
+    store = _store(tmp_path)
+    record = _record()
+    store.persist_new(record)
+    name = store.record_name(record.operation_id)
+    record_path = tmp_path / "outbox-state" / "records" / (name + ".json")
+    index_path = (
+        tmp_path
+        / "outbox-state"
+        / "idempotency"
+        / store.index_name(record.idempotency_hash)
+    )
+    index_path.unlink()
+    record_path.chmod(0o000)
+    try:
+        with pytest.raises(OutboxRefusal) as refusal:
+            store.find_for_enqueue("synthetic.outbox-2", record.idempotency_hash)
+        assert refusal.value.code is OutboxErrorCode.STORAGE_FAILED
+    finally:
+        record_path.chmod(0o600)
+    # Once readable again, the binding is still there and still refuses.
+    with pytest.raises(OutboxRefusal) as conflict:
+        store.find_for_enqueue("synthetic.outbox-2", record.idempotency_hash)
+    assert conflict.value.code is OutboxErrorCode.BINDING_CONFLICT
+
+
+def test_scan_does_not_quarantine_on_transient_failures(tmp_path: Path) -> None:
+    """One I/O error must fail the pass, not evict a healthy record."""
+    store = _store(tmp_path)
+    record = _record()
+    store.persist_new(record)
+    name = store.record_name(record.operation_id)
+    record_path = tmp_path / "outbox-state" / "records" / (name + ".json")
+    record_path.chmod(0o000)
+    try:
+        with pytest.raises(OutboxRefusal) as refusal:
+            store.scan()
+        assert refusal.value.code is OutboxErrorCode.STORAGE_FAILED
+        assert not list((tmp_path / "outbox-state" / "quarantine").iterdir())
+    finally:
+        record_path.chmod(0o600)
+    assert [found for _n, found in store.scan()] == [record]
+
+
+def test_stray_filenames_are_quarantined_without_failing_the_pass(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    record = _record()
+    store.persist_new(record)
+    stray = tmp_path / "outbox-state" / "records" / "stray.json"
+    stray.write_text("{}", encoding="utf-8")
+    survivors = store.scan()
+    assert [found for _n, found in survivors] == [record]
+    assert not stray.exists()
+    quarantined = [
+        path.name for path in (tmp_path / "outbox-state" / "quarantine").iterdir()
+    ]
+    assert quarantined == ["stray.json.bin"]
 
 
 def test_index_content_is_never_turned_into_a_path(tmp_path: Path) -> None:
