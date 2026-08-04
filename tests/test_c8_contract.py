@@ -141,6 +141,9 @@ def test_terminal_states_purge_and_sandbox_is_always_removed() -> None:
         encoding="utf-8"
     )
     assert 'update["envelope"] = None' in service_source
-    assert "shutil.rmtree(sandbox, ignore_errors=True)" in service_source
+    # Sandbox cleanup is strict: a swallowed removal failure would leave
+    # plaintext on disk while reporting an ordinary refusal.
+    assert "shutil.rmtree(sandbox)" in service_source
+    assert "ignore_errors" not in service_source
     for forbidden in ('"stash"', '"reset"', '"clean"', '"prune"'):
         assert forbidden not in service_source

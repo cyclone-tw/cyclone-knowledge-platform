@@ -183,3 +183,21 @@ def test_unknown_writer_codes_are_never_optimistically_replayed() -> None:
     for bad_limit in (0, -1, True, "2"):
         with pytest.raises(OutboxRefusal):
             BaseMovementPolicyV1(max_transient_attempts=bad_limit)
+
+
+def test_crashed_admission_sandboxes_are_swept_on_recover(
+    tmp_path: Path,
+) -> None:
+    """A SIGKILL inside the admission window may strand plaintext on disk;
+    the next recovery pass must remove it before any replay work."""
+    harness = build_outbox_harness(tmp_path)
+    enqueue(harness.service)
+    stranded = harness.store.admission_root / "crashed-sandbox"
+    stranded.mkdir()
+    (stranded / "note.md").write_text(
+        "SYNTHETIC-OUTBOX-BODY-NEEDLE stranded by a crash\n", encoding="utf-8"
+    )
+
+    harness.service.replay_pending()
+    assert list(harness.store.admission_root.iterdir()) == []
+    assert_no_plaintext_at_rest(harness.store_root)

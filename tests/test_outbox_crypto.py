@@ -91,3 +91,20 @@ def test_key_provider_refuses_weak_or_missing_material() -> None:
     with pytest.raises(OutboxRefusal) as refusal:
         provider.key("missing-key-id")
     assert refusal.value.code is OutboxErrorCode.KEY_DENIED
+
+
+def test_provider_failures_never_chain_key_material() -> None:
+    """A provider's own error text may embed secrets; the refusal must not
+    carry it in __cause__ or __context__."""
+
+    class LeakyProvider:
+        def key(self, key_id: str) -> bytes:
+            del key_id
+            raise RuntimeError("SYNTHETIC-LEAKED-KEY-MATERIAL")
+
+    cipher = OutboxCipherV1(LeakyProvider())
+    with pytest.raises(OutboxRefusal) as refusal:
+        cipher.encrypt("any-key-id", PLAINTEXT)
+    assert refusal.value.code is OutboxErrorCode.KEY_DENIED
+    assert refusal.value.__cause__ is None
+    assert refusal.value.__context__ is None

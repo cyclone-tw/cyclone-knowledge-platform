@@ -30,6 +30,7 @@ def _residue_free(harness) -> None:
     assert not list((harness.store_root / "records").iterdir())
     assert not list((harness.store_root / "idempotency").iterdir())
     assert not list((harness.store_root / "tmp").iterdir())
+    assert not list((harness.store_root / "admission").iterdir())
     assert_no_plaintext_at_rest(harness.store_root)
 
 
@@ -154,6 +155,7 @@ def test_successful_enqueue_ran_every_validator_and_persisted_once(
     assert len(list((harness.store_root / "idempotency").iterdir())) == 1
     assert not list((harness.store_root / "tmp").iterdir())
     assert not list((harness.store_root / "quarantine").iterdir())
+    assert not list((harness.store_root / "admission").iterdir())
     assert_no_plaintext_at_rest(harness.store_root)
     # Enqueue is not a commit: the synthetic repository is untouched.
     assert operation_commits(harness.repository) == ()

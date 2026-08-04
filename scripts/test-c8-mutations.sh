@@ -274,6 +274,56 @@ expect_red \
   "unknown writer codes optimistically replayed" \
   tests/test_outbox_recovery.py::test_unknown_writer_codes_are_never_optimistically_replayed
 
+echo "==> review round-1 hardening guards"
+new_case
+replace_once \
+  "src/ckp/outbox/store.py" \
+'        self._write_index(record.idempotency_hash, name)
+        self._atomic_write(path, _encode(record))' \
+'        self._atomic_write(path, _encode(record))
+        self._write_index(record.idempotency_hash, name)'
+expect_red \
+  "record committed before its provisional index" \
+  tests/test_outbox_store.py::test_torn_enqueue_is_refused_and_never_resurrects
+
+new_case
+replace_once \
+  "src/ckp/outbox/store.py" \
+  '        for leftover in self._admission.iterdir():' \
+  '        for leftover in ():'
+expect_red \
+  "crashed admission sandboxes are never swept" \
+  tests/test_outbox_recovery.py::test_crashed_admission_sandboxes_are_swept_on_recover
+
+new_case
+replace_once \
+  "src/ckp/outbox/store.py" \
+  '            if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):' \
+  '            if False and stat.S_ISLNK(value.st_mode):'
+expect_red \
+  "symlinked store subdirectory accepted" \
+  tests/test_outbox_store.py::test_open_refuses_symlinked_store_subdirectories
+
+new_case
+replace_once \
+  "src/ckp/outbox/crypto.py" \
+'        except Exception:
+            root = None' \
+'        except Exception as exc:
+            raise OutboxRefusal(OutboxErrorCode.KEY_DENIED) from exc'
+expect_red \
+  "key provider exception chain reattached" \
+  tests/test_outbox_crypto.py::test_provider_failures_never_chain_key_material
+
+new_case
+replace_once \
+  "src/ckp/outbox/service.py" \
+  '            shutil.rmtree(sandbox)' \
+  '            shutil.rmtree(sandbox, ignore_errors=True)'
+expect_red \
+  "sandbox cleanup failures silently swallowed" \
+  tests/test_c8_contract.py::test_terminal_states_purge_and_sandbox_is_always_removed
+
 echo "==> receipt and namespace guards"
 new_case
 replace_once \

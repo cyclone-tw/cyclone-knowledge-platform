@@ -2,9 +2,11 @@
 
 Every record is one JSON file written atomically (ciphertext-only temp file,
 fsync, rename, directory fsync), so a crash leaves either the previous state
-or the next one -- never a torn record. The idempotency index is derived data
-and is rebuilt from records during recovery; records are the single source of
-truth. Nothing in this module ever holds plaintext payload bytes.
+or the next one -- never a torn record. The record file is the single commit
+point of an enqueue: the derived idempotency index is written *before* the
+record and swept when dangling, so no crash ordering can turn a refused
+enqueue into a replayable one. Nothing in this module ever holds plaintext
+payload bytes; the admission sandbox area is swept, never read.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import fcntl
 import hashlib
 import json
 import os
+import shutil
 import stat
 import tempfile
 import time
@@ -53,15 +56,31 @@ class OutboxStore:
         store._index = root / "idempotency"
         store._tmp = root / "tmp"
         store._quarantine = root / "quarantine"
+        store._admission = root / "admission"
         store._lock_timeout_seconds = lock_timeout_seconds
         for directory in (
             store._records,
             store._index,
             store._tmp,
             store._quarantine,
+            store._admission,
         ):
-            directory.mkdir(mode=0o700, exist_ok=True)
+            # A pre-planted symlink here would route durable records outside
+            # the disjointness policy checked above; refuse anything that is
+            # not a plain physical directory.
+            try:
+                directory.mkdir(mode=0o700, exist_ok=True)
+                value = directory.lstat()
+            except OSError as exc:
+                raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED) from exc
+            if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
+                raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED)
         return store
+
+    @property
+    def admission_root(self) -> Path:
+        """Where enqueue admission sandboxes live; swept on every recover."""
+        return self._admission
 
     # -- naming -----------------------------------------------------------
 
@@ -136,17 +155,27 @@ class OutboxStore:
     def find_for_enqueue(
         self, operation_id: str, idempotency_hash: str
     ) -> OutboxRecord | None:
-        """Resolve both indexes; disagreement between them fails closed."""
+        """Resolve both indexes; records are truth, the index is derived.
+
+        An index entry pointing at an *existing* other record means the key
+        is bound elsewhere and fails closed. An entry pointing at a missing
+        record is the residue of a crashed enqueue that never reached its
+        commit point; it is deleted here rather than trusted.
+        """
         name = self.record_name(operation_id)
         record = self.load(name)
         index_target = self._read_index(idempotency_hash)
-        if record is None and index_target is None:
-            return None
-        if record is None:
-            # The key is already bound to some other operation's record.
-            raise OutboxRefusal(OutboxErrorCode.BINDING_CONFLICT)
         if index_target is not None and index_target != name:
-            raise OutboxRefusal(OutboxErrorCode.BINDING_CONFLICT)
+            if self.load(index_target) is not None:
+                raise OutboxRefusal(OutboxErrorCode.BINDING_CONFLICT)
+            self._drop_index(idempotency_hash)
+            index_target = None
+        if record is None:
+            if index_target is not None:
+                # The entry names this operation but its record never
+                # committed: a torn enqueue, not an enqueued operation.
+                self._drop_index(idempotency_hash)
+            return None
         if record.idempotency_hash != idempotency_hash:
             raise OutboxRefusal(OutboxErrorCode.BINDING_CONFLICT)
         return record
@@ -173,12 +202,19 @@ class OutboxStore:
     # -- writes -----------------------------------------------------------
 
     def persist_new(self, record: OutboxRecord) -> None:
+        """Provisional index first, record last: the record is the commit.
+
+        A crash after the index write leaves only a dangling entry that
+        recovery and enqueue both discard, so a refused or torn enqueue can
+        never resurrect into a replayable record. The reverse order would
+        durably enqueue an operation whose caller was told it failed.
+        """
         name = self.record_name(record.operation_id)
         path = self._records / (name + _RECORD_SUFFIX)
         if path.exists():
             raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED)
-        self._atomic_write(path, _encode(record))
         self._write_index(record.idempotency_hash, name)
+        self._atomic_write(path, _encode(record))
 
     def rewrite(self, record: OutboxRecord) -> None:
         name = self.record_name(record.operation_id)
@@ -188,12 +224,36 @@ class OutboxStore:
         self._atomic_write(path, _encode(record))
 
     def recover(self) -> None:
-        """Discard torn temp files and rebuild missing derived index entries."""
+        """Restore every derived and transient area to a clean state.
+
+        Torn temp files and crashed admission sandboxes are discarded,
+        dangling index entries (a crashed enqueue that never reached its
+        record commit) are swept, and missing index entries are rebuilt from
+        the records that are the source of truth.
+        """
         for orphan in self._tmp.iterdir():
             try:
                 orphan.unlink()
             except OSError as exc:
                 raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED) from exc
+        for leftover in self._admission.iterdir():
+            try:
+                if leftover.is_dir() and not leftover.is_symlink():
+                    shutil.rmtree(leftover)
+                else:
+                    leftover.unlink()
+            except OSError as exc:
+                raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED) from exc
+        for entry in self._index.iterdir():
+            try:
+                target = entry.read_text(encoding="ascii").strip()
+            except (OSError, ValueError) as exc:
+                raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED) from exc
+            if not target or not (self._records / (target + _RECORD_SUFFIX)).exists():
+                try:
+                    entry.unlink()
+                except OSError as exc:
+                    raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED) from exc
         for name, record in self.scan():
             if self._read_index(record.idempotency_hash) is None:
                 self._write_index(record.idempotency_hash, name)
@@ -213,6 +273,13 @@ class OutboxStore:
     def _write_index(self, idempotency_hash: str, name: str) -> None:
         path = self._index / self.index_name(idempotency_hash)
         self._atomic_write(path, name.encode("ascii"))
+
+    def _drop_index(self, idempotency_hash: str) -> None:
+        path = self._index / self.index_name(idempotency_hash)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED) from exc
 
     def _atomic_write(self, destination: Path, content: bytes) -> None:
         try:

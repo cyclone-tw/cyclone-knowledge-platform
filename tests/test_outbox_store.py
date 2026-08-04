@@ -108,7 +108,7 @@ def test_find_for_enqueue_resolves_both_indexes(tmp_path: Path) -> None:
     assert found == record
 
 
-def test_index_disagreement_fails_closed(tmp_path: Path) -> None:
+def test_key_bound_to_another_live_record_fails_closed(tmp_path: Path) -> None:
     store = _store(tmp_path)
     record = _record()
     store.persist_new(record)
@@ -117,18 +117,80 @@ def test_index_disagreement_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(OutboxRefusal) as key_reuse:
         store.find_for_enqueue("synthetic.outbox-2", record.idempotency_hash)
     assert key_reuse.value.code is OutboxErrorCode.BINDING_CONFLICT
-    # An index entry pointing at a different record than the operation's own
-    # file is a torn write and must never be silently repaired at enqueue.
-    index_path = (
-        tmp_path
-        / "outbox-state"
-        / "idempotency"
-        / store.index_name(record.idempotency_hash)
-    )
+
+
+def test_dangling_index_entries_are_discarded_not_trusted(tmp_path: Path) -> None:
+    """A crashed enqueue leaves only a provisional index entry behind.
+
+    Records are the source of truth: an entry naming a record that never
+    reached its commit point must be swept, both at enqueue and in recovery,
+    and must never turn into a conflict or a replayable operation.
+    """
+    store = _store(tmp_path)
+    record = _record()
+    store.persist_new(record)
+    index_dir = tmp_path / "outbox-state" / "idempotency"
+
+    # Entry pointing at a record that does not exist: dropped, then healed.
+    index_path = index_dir / store.index_name(record.idempotency_hash)
     index_path.write_text("0" * 64, encoding="ascii")
-    with pytest.raises(OutboxRefusal) as torn:
-        store.find_for_enqueue(record.operation_id, record.idempotency_hash)
-    assert torn.value.code is OutboxErrorCode.BINDING_CONFLICT
+    healed = store.find_for_enqueue(record.operation_id, record.idempotency_hash)
+    assert healed == record
+    assert not index_path.exists()
+    store.recover()
+    assert index_path.read_text(encoding="ascii") == store.record_name(
+        record.operation_id
+    )
+
+    # A pure crashed-enqueue residue: index entry, no record at all.
+    other_key = "sha256:" + "f" * 64
+    (index_dir / store.index_name(other_key)).write_text("1" * 64, encoding="ascii")
+    assert store.find_for_enqueue("synthetic.outbox-9", other_key) is None
+    assert not (index_dir / store.index_name(other_key)).exists()
+
+
+def test_torn_enqueue_is_refused_and_never_resurrects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record write is the commit point of persist_new.
+
+    Failing the second durable write simulates the crash window. With the
+    frozen index-first order the surviving artifact is only a dangling index
+    entry; a record-first order would durably enqueue an operation whose
+    caller was told the enqueue failed.
+    """
+    store = _store(tmp_path)
+    record = _record()
+    real_write = store._atomic_write
+    calls = {"count": 0}
+
+    def second_write_dies(destination: Path, content: bytes) -> None:
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED)
+        real_write(destination, content)
+
+    monkeypatch.setattr(store, "_atomic_write", second_write_dies)
+    with pytest.raises(OutboxRefusal):
+        store.persist_new(record)
+    monkeypatch.undo()
+
+    restarted = _store(tmp_path)
+    restarted.recover()
+    assert restarted.scan() == []
+    assert not list((tmp_path / "outbox-state" / "idempotency").iterdir())
+
+
+def test_open_refuses_symlinked_store_subdirectories(tmp_path: Path) -> None:
+    """A pre-planted symlink would route records outside the disjoint root."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / "outbox-state"
+    root.mkdir()
+    (root / "records").symlink_to(outside)
+    with pytest.raises(OutboxRefusal) as refusal:
+        OutboxStore.open(root, disjoint_from=(), lock_timeout_seconds=1.0)
+    assert refusal.value.code is OutboxErrorCode.STORAGE_FAILED
 
 
 def test_recover_discards_temp_orphans_and_rebuilds_indexes(

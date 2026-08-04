@@ -200,36 +200,39 @@ class OutboxService:
                 raise OutboxRefusal(OutboxErrorCode.INTERNAL_ERROR)
             self._target_policy.authorize(target, verdict.privacy)
             self._payload_scanner.scan(content)
-            self._validate_in_sandbox(target.path, content)
 
-            record = OutboxRecord(
-                record_version=RECORD_VERSION,
-                writer_contract=WRITER_CONTRACT,
-                operation_id=parsed.operation_id,
-                idempotency_hash=_hash(
-                    parsed.idempotency_key.get_secret_value().encode("utf-8")
-                ),
-                actor=context.actor,
-                task_hash=_hash(context.task_id.encode("utf-8")),
-                target_path=target.path,
-                request_hash=_request_hash(parsed, context),
-                content_hash=content_hash,
-                enqueue_base_commit=self._read_base(),
-                created_at=created_at,
-                expires_at=expires_at,
-                binding_hash="sha256:" + "0" * 64,
-                state=OutboxState.QUEUED,
-                attempts=0,
-                state_changed_at=created_at,
-                envelope=self._cipher.encrypt(
-                    self._key_id,
-                    _payload_bytes(parsed, context, created_at),
-                ),
-            )
-            record = record.model_copy(
-                update={"binding_hash": record.expected_binding_hash()}
-            )
+            # The mutation lock covers the sandbox as well as the store
+            # mutation: recover() sweeps crashed sandboxes under the same
+            # lock, so it can never delete one that is still validating.
             with self._store.mutation_lock():
+                self._validate_in_sandbox(target.path, content)
+                record = OutboxRecord(
+                    record_version=RECORD_VERSION,
+                    writer_contract=WRITER_CONTRACT,
+                    operation_id=parsed.operation_id,
+                    idempotency_hash=_hash(
+                        parsed.idempotency_key.get_secret_value().encode("utf-8")
+                    ),
+                    actor=context.actor,
+                    task_hash=_hash(context.task_id.encode("utf-8")),
+                    target_path=target.path,
+                    request_hash=_request_hash(parsed, context),
+                    content_hash=content_hash,
+                    enqueue_base_commit=self._read_base(),
+                    created_at=created_at,
+                    expires_at=expires_at,
+                    binding_hash="sha256:" + "0" * 64,
+                    state=OutboxState.QUEUED,
+                    attempts=0,
+                    state_changed_at=created_at,
+                    envelope=self._cipher.encrypt(
+                        self._key_id,
+                        _payload_bytes(parsed, context, created_at),
+                    ),
+                )
+                record = record.model_copy(
+                    update={"binding_hash": record.expected_binding_hash()}
+                )
                 existing = self._store.find_for_enqueue(
                     record.operation_id, record.idempotency_hash
                 )
@@ -251,19 +254,28 @@ class OutboxService:
     def _validate_in_sandbox(self, target_path: str, content: bytes) -> None:
         """Run the worktree validators before anything durable exists.
 
-        The sandbox is an 0700 directory outside both the outbox state root
-        and the synthetic repository, and it is removed before this method
-        returns -- on rejection *and* on success -- so a refused payload
-        never survives on disk anywhere.
+        The sandbox is an 0700 directory under the store's admission area
+        and is removed before this method returns -- on rejection *and* on
+        success. A cleanup failure outranks the validation outcome, because
+        it means plaintext is still on disk; and if the process dies inside
+        the window, the next ``recover()`` sweeps the whole admission area,
+        so crashed sandboxes never outlive one restart.
         """
-        sandbox = Path(tempfile.mkdtemp(prefix="ckp-outbox-admission-"))
+        sandbox = Path(tempfile.mkdtemp(dir=self._store.admission_root))
+        outcome: BaseException | None = None
         try:
             destination = sandbox / target_path
             destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             destination.write_bytes(content)
             self._validation_pipeline.validate(sandbox, target_path)
-        finally:
-            shutil.rmtree(sandbox, ignore_errors=True)
+        except BaseException as exc:
+            outcome = exc
+        try:
+            shutil.rmtree(sandbox)
+        except OSError:
+            raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED) from None
+        if outcome is not None:
+            raise outcome
 
     # -- replay -----------------------------------------------------------
 
@@ -410,10 +422,14 @@ class OutboxService:
             or parsed.target_path != record.target_path
         ):
             raise OutboxRefusal(OutboxErrorCode.RECORD_CORRUPT)
+        # The resolver's own exception may embed credential material; sever
+        # the chain so no secret can ride along on the refusal.
         try:
             credential = self._credential_resolver(payload["actor_id"])
-        except Exception as exc:
-            raise OutboxRefusal(OutboxErrorCode.ACTOR_DENIED) from exc
+        except Exception:
+            credential = None
+        if credential is None or not isinstance(credential, str):
+            raise OutboxRefusal(OutboxErrorCode.ACTOR_DENIED)
         name = OutboxStore.record_name(record.operation_id)
         try:
             context = self._identity_registry.resolve(
