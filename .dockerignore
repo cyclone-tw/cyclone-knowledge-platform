@@ -18,6 +18,17 @@ tests/*
 !tests/test_writer_target.py
 !tests/test_writer_transaction.py
 !tests/test_writer_validation.py
+!tests/test_privacy_contract.py
+!tests/outbox_fixtures.py
+!tests/test_c8_contract.py
+!tests/test_outbox_errors.py
+!tests/test_outbox_models.py
+!tests/test_outbox_crypto.py
+!tests/test_outbox_store.py
+!tests/test_outbox_enqueue_gate.py
+!tests/test_outbox_privacy_routing.py
+!tests/test_outbox_replay.py
+!tests/test_outbox_recovery.py
 scripts
 config
 AGENTS.md
