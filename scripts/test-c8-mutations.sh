@@ -429,6 +429,18 @@ expect_red \
   "stray filenames break the scan instead of being quarantined" \
   tests/test_outbox_store.py::test_stray_filenames_are_quarantined_without_failing_the_pass
 
+echo "==> review round-4 hardening guards"
+new_case
+replace_once \
+  "src/ckp/outbox/store.py" \
+'            except FileExistsError:
+                continue' \
+'            except FileExistsError:
+                pass'
+expect_red \
+  "quarantine name collisions destroy prior audit bytes" \
+  tests/test_outbox_store.py::test_repeated_quarantine_never_overwrites_prior_audit_bytes
+
 echo "==> receipt and namespace guards"
 new_case
 replace_once \

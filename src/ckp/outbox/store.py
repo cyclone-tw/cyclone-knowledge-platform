@@ -375,11 +375,28 @@ class OutboxStore:
             os.close(descriptor)
 
     def _quarantine_raw(self, path: Path) -> None:
-        destination = self._quarantine / (path.name + ".bin")
-        try:
-            os.replace(path, destination)
-        except OSError as exc:
-            raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED) from exc
+        """Move raw bytes into quarantine without overwriting prior audit.
+
+        Destination names are probed with a counter and claimed via
+        ``os.link``, which fails on an existing target, so repeated
+        quarantines of the same name preserve every earlier artifact even
+        across concurrent holders of the two different store locks.
+        """
+        for counter in range(1000):
+            suffix = ".bin" if counter == 0 else f".{counter}.bin"
+            destination = self._quarantine / (path.name + suffix)
+            try:
+                os.link(path, destination)
+            except FileExistsError:
+                continue
+            except OSError as exc:
+                raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED) from exc
+            try:
+                os.unlink(path)
+            except OSError as exc:
+                raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED) from exc
+            return
+        raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED)
 
 
 def _encode(record: OutboxRecord) -> bytes:

@@ -399,3 +399,20 @@ def test_index_content_is_never_turned_into_a_path(tmp_path: Path) -> None:
     store.recover()
     assert not traversal.exists()
     assert outside.exists()
+
+
+def test_repeated_quarantine_never_overwrites_prior_audit_bytes(
+    tmp_path: Path,
+) -> None:
+    """Two strays with the same name must both survive as audit artifacts."""
+    store = _store(tmp_path)
+    records = tmp_path / "outbox-state" / "records"
+    quarantine = tmp_path / "outbox-state" / "quarantine"
+    (records / "stray.json").write_text("first-audit-bytes", encoding="utf-8")
+    store.scan()
+    (records / "stray.json").write_text("second-audit-bytes", encoding="utf-8")
+    store.scan()
+    names = sorted(path.name for path in quarantine.iterdir())
+    assert names == ["stray.json.1.bin", "stray.json.bin"]
+    contents = sorted(path.read_text(encoding="utf-8") for path in quarantine.iterdir())
+    assert contents == ["first-audit-bytes", "second-audit-bytes"]
