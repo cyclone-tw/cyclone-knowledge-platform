@@ -92,16 +92,25 @@ class OutboxCipherV1:
         return _keystream_xor(enc_key, nonce, ciphertext)
 
     def _subkeys(self, key_id: str) -> tuple[bytes, bytes]:
-        # The provider's own exception may embed key material in its message;
-        # sever the chain (no ``from exc``, raise outside the handler) so the
-        # refusal carries neither a __cause__ nor a __context__ with secrets.
+        # The provider's exception -- including a provider-minted
+        # OutboxRefusal with its own chain -- may embed key material in its
+        # message or context. Only the stable code survives; the refusal is
+        # re-minted outside the handler so it carries neither a __cause__
+        # nor a __context__.
         root: object = None
+        refusal_code: OutboxErrorCode | None = None
         try:
             root = self._key_provider.key(key_id)
-        except OutboxRefusal:
-            raise
+        except OutboxRefusal as exc:
+            refusal_code = (
+                exc.code
+                if isinstance(exc.code, OutboxErrorCode)
+                else OutboxErrorCode.KEY_DENIED
+            )
         except Exception:
             root = None
+        if refusal_code is not None:
+            raise OutboxRefusal(refusal_code)
         if not isinstance(root, bytes) or len(root) < _MIN_KEY_BYTES:
             raise OutboxRefusal(OutboxErrorCode.KEY_DENIED)
         enc_key = hmac.new(root, _ENC_DOMAIN, hashlib.sha256).digest()

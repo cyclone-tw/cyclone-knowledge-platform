@@ -279,9 +279,14 @@ new_case
 replace_once \
   "src/ckp/outbox/store.py" \
 '        self._write_index(record.idempotency_hash, name)
-        self._atomic_write(path, _encode(record))' \
+        try:
+            self._atomic_write(path, _encode(record))
+        except OutboxRefusal:' \
 '        self._atomic_write(path, _encode(record))
-        self._write_index(record.idempotency_hash, name)'
+        self._write_index(record.idempotency_hash, name)
+        try:
+            pass
+        except OutboxRefusal:'
 expect_red \
   "record committed before its provisional index" \
   tests/test_outbox_store.py::test_torn_enqueue_is_refused_and_never_resurrects
@@ -323,6 +328,58 @@ replace_once \
 expect_red \
   "sandbox cleanup failures silently swallowed" \
   tests/test_c8_contract.py::test_terminal_states_purge_and_sandbox_is_always_removed
+
+echo "==> review round-2 hardening guards"
+new_case
+replace_once \
+  "src/ckp/outbox/store.py" \
+  '            holder = self._record_holding_key(idempotency_hash)' \
+  '            holder = None'
+expect_red \
+  "a lost index entry unbinds a live key" \
+  tests/test_outbox_store.py::test_a_lost_index_entry_does_not_unbind_a_live_key
+
+new_case
+replace_once \
+  "src/ckp/outbox/store.py" \
+  '                path.unlink(missing_ok=True)' \
+  '                pass  # mutant keeps the unprovable record'
+expect_red \
+  "unprovable record write survives its refusal" \
+  tests/test_outbox_store.py::test_unprovable_record_write_is_rolled_back_not_enqueued
+
+new_case
+replace_once \
+  "src/ckp/outbox/store.py" \
+  '        if _RECORD_NAME.fullmatch(name) is None:' \
+  '        if False and _RECORD_NAME.fullmatch(name) is None:'
+expect_red \
+  "record-name shape guard removed from load" \
+  tests/test_outbox_store.py::test_index_content_is_never_turned_into_a_path
+
+new_case
+replace_once \
+  "src/ckp/outbox/store.py" \
+  '                _RECORD_NAME.fullmatch(target) is None' \
+  '                False'
+expect_red \
+  "index-content shape guard removed from recover" \
+  tests/test_outbox_store.py::test_index_content_is_never_turned_into_a_path
+
+new_case
+replace_once \
+  "src/ckp/outbox/crypto.py" \
+'        except OutboxRefusal as exc:
+            refusal_code = (
+                exc.code
+                if isinstance(exc.code, OutboxErrorCode)
+                else OutboxErrorCode.KEY_DENIED
+            )' \
+'        except OutboxRefusal:
+            raise'
+expect_red \
+  "provider-minted refusal chain passes through" \
+  tests/test_outbox_crypto.py::test_provider_minted_refusals_are_reminted_without_chain
 
 echo "==> receipt and namespace guards"
 new_case

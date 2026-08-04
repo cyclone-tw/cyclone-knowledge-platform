@@ -108,3 +108,23 @@ def test_provider_failures_never_chain_key_material() -> None:
     assert refusal.value.code is OutboxErrorCode.KEY_DENIED
     assert refusal.value.__cause__ is None
     assert refusal.value.__context__ is None
+
+
+def test_provider_minted_refusals_are_reminted_without_chain() -> None:
+    """Even a provider-raised OutboxRefusal may drag key material along in
+    its own chain; only the stable code may survive."""
+
+    class ChainedRefusalProvider:
+        def key(self, key_id: str) -> bytes:
+            del key_id
+            try:
+                raise RuntimeError("SYNTHETIC-LEAKED-KEY-MATERIAL")
+            except RuntimeError as exc:
+                raise OutboxRefusal(OutboxErrorCode.KEY_DENIED) from exc
+
+    cipher = OutboxCipherV1(ChainedRefusalProvider())
+    with pytest.raises(OutboxRefusal) as refusal:
+        cipher.encrypt("any-key-id", PLAINTEXT)
+    assert refusal.value.code is OutboxErrorCode.KEY_DENIED
+    assert refusal.value.__cause__ is None
+    assert refusal.value.__context__ is None

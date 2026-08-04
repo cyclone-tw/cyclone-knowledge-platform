@@ -11,10 +11,12 @@ payload bytes; the admission sandbox area is swept, never read.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -27,6 +29,10 @@ from ckp.outbox.errors import OutboxErrorCode, OutboxRefusal
 from ckp.outbox.models import OutboxRecord, record_from_json
 
 _RECORD_SUFFIX = ".json"
+#: The only record-name shape this store ever minted. Everything that turns
+#: stored text into a path goes through this, so corrupted or malicious
+#: index content can never traverse outside the records directory.
+_RECORD_NAME = re.compile(r"^[0-9a-f]{64}$")
 
 
 class OutboxStore:
@@ -139,6 +145,8 @@ class OutboxStore:
     # -- reads ------------------------------------------------------------
 
     def load(self, name: str) -> OutboxRecord | None:
+        if _RECORD_NAME.fullmatch(name) is None:
+            raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED)
         path = self._records / (name + _RECORD_SUFFIX)
         try:
             raw = path.read_bytes()
@@ -175,10 +183,33 @@ class OutboxStore:
                 # The entry names this operation but its record never
                 # committed: a torn enqueue, not an enqueued operation.
                 self._drop_index(idempotency_hash)
+            # A missing index entry does not unbind the key: some live
+            # record may still hold it (the entry can be lost to a crash).
+            holder = self._record_holding_key(idempotency_hash)
+            if holder is not None:
+                self._write_index(idempotency_hash, holder)
+                raise OutboxRefusal(OutboxErrorCode.BINDING_CONFLICT)
             return None
         if record.idempotency_hash != idempotency_hash:
             raise OutboxRefusal(OutboxErrorCode.BINDING_CONFLICT)
         return record
+
+    def _record_holding_key(self, idempotency_hash: str) -> str | None:
+        """The name of the live record bound to this key, if any exists.
+
+        Consulted only when the derived index has no answer. Records that
+        cannot be parsed are skipped here -- recovery quarantines them, and
+        their key binding dies with them.
+        """
+        for path in sorted(self._records.glob("*" + _RECORD_SUFFIX)):
+            name = path.name.removesuffix(_RECORD_SUFFIX)
+            try:
+                record = self.load(name)
+            except OutboxRefusal:
+                continue
+            if record is not None and record.idempotency_hash == idempotency_hash:
+                return name
+        return None
 
     def scan(self) -> list[tuple[str, OutboxRecord]]:
         """Every parseable active record in deterministic name order.
@@ -214,7 +245,17 @@ class OutboxStore:
         if path.exists():
             raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED)
         self._write_index(record.idempotency_hash, name)
-        self._atomic_write(path, _encode(record))
+        try:
+            self._atomic_write(path, _encode(record))
+        except OutboxRefusal:
+            # The record may already be visible (rename done, directory
+            # fsync failed). The refusal must match the visible state, so
+            # roll the create back before reporting it. A crash inside this
+            # narrow window is the irreducible filesystem residue.
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)
+            self._drop_index(record.idempotency_hash)
+            raise
 
     def rewrite(self, record: OutboxRecord) -> None:
         name = self.record_name(record.operation_id)
@@ -249,7 +290,12 @@ class OutboxStore:
                 target = entry.read_text(encoding="ascii").strip()
             except (OSError, ValueError) as exc:
                 raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED) from exc
-            if not target or not (self._records / (target + _RECORD_SUFFIX)).exists():
+            # Shape first: content that is not a minted record name must be
+            # swept without ever being turned into a filesystem probe.
+            if (
+                _RECORD_NAME.fullmatch(target) is None
+                or not (self._records / (target + _RECORD_SUFFIX)).exists()
+            ):
                 try:
                     entry.unlink()
                 except OSError as exc:
@@ -293,13 +339,16 @@ class OutboxStore:
             finally:
                 os.close(descriptor)
             os.replace(temp_name, destination)
-            directory = os.open(destination.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+            self._fsync_directory(destination.parent)
         except OSError as exc:
             raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED) from exc
+
+    def _fsync_directory(self, directory: Path) -> None:
+        descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     def _quarantine_raw(self, path: Path) -> None:
         destination = self._quarantine / (path.name + ".bin")

@@ -164,14 +164,17 @@ def test_torn_enqueue_is_refused_and_never_resurrects(
     real_write = store._atomic_write
     calls = {"count": 0}
 
+    class SyntheticCrash(RuntimeError):
+        """Not an OutboxRefusal: nothing gets to roll back, as in a crash."""
+
     def second_write_dies(destination: Path, content: bytes) -> None:
         calls["count"] += 1
         if calls["count"] == 2:
-            raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED)
+            raise SyntheticCrash
         real_write(destination, content)
 
     monkeypatch.setattr(store, "_atomic_write", second_write_dies)
-    with pytest.raises(OutboxRefusal):
+    with pytest.raises(SyntheticCrash):
         store.persist_new(record)
     monkeypatch.undo()
 
@@ -258,3 +261,68 @@ def test_locks_are_exclusive_and_fail_closed_on_contention(
         with pytest.raises(OutboxRefusal) as consumer, other.consumer_leader():
             pass
         assert consumer.value.code is OutboxErrorCode.LEASE_UNAVAILABLE
+
+
+def test_a_lost_index_entry_does_not_unbind_a_live_key(tmp_path: Path) -> None:
+    """The derived entry can be lost to a crash; the key binding cannot."""
+    store = _store(tmp_path)
+    record = _record()
+    store.persist_new(record)
+    index_path = (
+        tmp_path
+        / "outbox-state"
+        / "idempotency"
+        / store.index_name(record.idempotency_hash)
+    )
+    index_path.unlink()
+    with pytest.raises(OutboxRefusal) as refusal:
+        store.find_for_enqueue("synthetic.outbox-2", record.idempotency_hash)
+    assert refusal.value.code is OutboxErrorCode.BINDING_CONFLICT
+    # The derived entry is healed back to the true holder.
+    assert index_path.read_text(encoding="ascii") == store.record_name(
+        record.operation_id
+    )
+
+
+def test_unprovable_record_write_is_rolled_back_not_enqueued(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rename done + directory fsync failed must not report a refusal while
+    leaving a replayable record behind."""
+    store = _store(tmp_path)
+    record = _record()
+    real_fsync = store._fsync_directory
+
+    def records_fsync_dies(directory: Path) -> None:
+        if directory.name == "records":
+            raise OSError("synthetic fsync failure")
+        real_fsync(directory)
+
+    monkeypatch.setattr(store, "_fsync_directory", records_fsync_dies)
+    with pytest.raises(OutboxRefusal):
+        store.persist_new(record)
+    monkeypatch.undo()
+
+    restarted = _store(tmp_path)
+    restarted.recover()
+    assert restarted.scan() == []
+    assert not list((tmp_path / "outbox-state" / "idempotency").iterdir())
+
+
+def test_index_content_is_never_turned_into_a_path(tmp_path: Path) -> None:
+    """Corrupt or malicious index content must fail closed, not traverse."""
+    store = _store(tmp_path)
+    store.persist_new(_record())
+    outside = tmp_path / "outside-secret.json"
+    outside.write_text("{}", encoding="utf-8")
+    key = "sha256:" + "e" * 64
+    traversal = tmp_path / "outbox-state" / "idempotency" / store.index_name(key)
+    traversal.write_text("../../outside-secret", encoding="ascii")
+
+    with pytest.raises(OutboxRefusal) as refusal:
+        store.find_for_enqueue("synthetic.outbox-7", key)
+    assert refusal.value.code is OutboxErrorCode.STORAGE_FAILED
+    # Recovery sweeps the malformed entry without probing outside the store.
+    store.recover()
+    assert not traversal.exists()
+    assert outside.exists()
