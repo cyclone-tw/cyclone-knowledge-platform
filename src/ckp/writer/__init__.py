@@ -13,6 +13,13 @@ from ckp.writer.errors import (
     map_c2_reason,
 )
 from ckp.writer.models import RejectReceipt, SuccessReceipt, WriteRequest
+from ckp.writer.wiki_capture import (
+    CoreInboxCaptureAdapter,
+    CoreInboxCaptureReceipt,
+    CoreInboxCaptureRequest,
+    WikiCaptureErrorCode,
+    WikiCaptureRefusal,
+)
 
 __all__ = [
     "C2_REASON_CODES",
@@ -21,6 +28,11 @@ __all__ = [
     "RejectReceipt",
     "SuccessReceipt",
     "WriteRequest",
+    "CoreInboxCaptureAdapter",
+    "CoreInboxCaptureReceipt",
+    "CoreInboxCaptureRequest",
+    "WikiCaptureErrorCode",
+    "WikiCaptureRefusal",
     "WriterErrorCode",
     "WriterRefusal",
     "build_c7_synthetic_writer",

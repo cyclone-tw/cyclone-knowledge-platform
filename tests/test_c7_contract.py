@@ -99,6 +99,8 @@ def test_c7_expected_writer_modules_are_present() -> None:
         "service.py",
         "target.py",
         "validation.py",
+        "wiki_capture.py",
+        "wiki_capture_cli.py",
     }
 
 
