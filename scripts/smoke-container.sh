@@ -567,3 +567,21 @@ docker run --rm --entrypoint python "$WRITER_IMAGE" \
   tests/test_writer_transaction.py \
   tests/test_c7_contract.py
 echo "smoke: C7 synthetic Writer transaction matrix looks right"
+
+# C8 outbox smoke reuses the same disposable stage: the deterministic matrix
+# builds its synthetic Git fixture and encrypted outbox store under container
+# TMPDIR, enqueues, replays, and asserts exactly one logical commit with no
+# plaintext at rest -- on the deployment interpreter, not the dev venv.
+echo "==> C8 synthetic outbox enqueue and replay smoke"
+docker run --rm --entrypoint python "$WRITER_IMAGE" \
+  -m pytest -q \
+  tests/test_outbox_errors.py \
+  tests/test_outbox_models.py \
+  tests/test_outbox_crypto.py \
+  tests/test_outbox_store.py \
+  tests/test_outbox_enqueue_gate.py \
+  tests/test_outbox_privacy_routing.py \
+  tests/test_outbox_replay.py \
+  tests/test_outbox_recovery.py \
+  tests/test_c8_contract.py
+echo "smoke: C8 synthetic outbox enqueue and replay matrix looks right"
