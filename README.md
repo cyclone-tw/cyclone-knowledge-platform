@@ -24,9 +24,10 @@ private editable copy of the other's contract.
 
 ## Status
 
-Phase 3 C6: public-only C3 reads remain available, while `internal` and
-`sensitive` reads require an expiring server-owned task grant. See issue #1
-(platform Epic) for the child map, dependency order and file ownership.
+Phase 3 C7: the Writer contract is implemented for synthetic Git fixtures.
+Issue #12 adds an explicit local-only bridge to the existing Cyclone-Wiki Core
+inbox wrapper; it does not enable an HTTP Writer, Private writes or queuing.
+See issue #1 (platform Epic) for the child map and dependency order.
 
 ## Quick start
 
@@ -45,6 +46,33 @@ Container, including the endpoint smoke test:
 ```bash
 bash scripts/smoke-container.sh
 ```
+
+## Local Core inbox bridge
+
+`ckp-wiki-capture` delegates one authenticated, create-only capture to
+Cyclone-Wiki's existing `scripts/write_inbox_capture.sh`. The adapter fixes the
+route to `Codex + agent-discussion + Core/_inbox/agent-captures`; callers cannot
+select Private, a formal path, append mode or a different Git mode.
+
+The caller provides `CKP_WRITER_ACTOR_CREDENTIAL` and its separately configured
+`CKP_WRITER_ACTOR_CREDENTIAL_SHA256`. Neither value is forwarded to the Wiki
+wrapper. Host paths remain runtime inputs:
+
+```bash
+ckp-wiki-capture \
+  --wiki-root "$CYCLONE_WIKI_ROOT" \
+  --state-root "$CKP_WRITER_STATE_ROOT" \
+  --slug example-capture \
+  --title "Example capture" \
+  --body-file ./body.md \
+  --request-id request-1 \
+  --task-id task-1 \
+  --model-id gpt-5.4 \
+  --dry-run
+```
+
+This bridge is online-only. A wrapper, validation, freeze or push failure is a
+rejection; it is never reported as queued success.
 
 ## Read surfaces
 
