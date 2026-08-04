@@ -416,3 +416,18 @@ def test_repeated_quarantine_never_overwrites_prior_audit_bytes(
     assert names == ["stray.json.1.bin", "stray.json.bin"]
     contents = sorted(path.read_text(encoding="utf-8") for path in quarantine.iterdir())
     assert contents == ["first-audit-bytes", "second-audit-bytes"]
+
+
+def test_symlinked_strays_are_swept_never_followed(tmp_path: Path) -> None:
+    """Quarantine holds store-originated bytes only; a planted symlink is
+    removed without its external target ever being read or linked in."""
+    store = _store(tmp_path)
+    outside = tmp_path / "outside-plain.txt"
+    outside.write_text("OUTSIDE-PLAINTEXT-NEEDLE", encoding="utf-8")
+    stray = tmp_path / "outbox-state" / "records" / "stray.json"
+    stray.symlink_to(outside)
+
+    assert store.scan() == []
+    assert not stray.exists() and not stray.is_symlink()
+    assert list((tmp_path / "outbox-state" / "quarantine").iterdir()) == []
+    assert outside.read_text(encoding="utf-8") == "OUTSIDE-PLAINTEXT-NEEDLE"

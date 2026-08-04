@@ -429,6 +429,20 @@ expect_red \
   "stray filenames break the scan instead of being quarantined" \
   tests/test_outbox_store.py::test_stray_filenames_are_quarantined_without_failing_the_pass
 
+echo "==> review round-5 hardening guards"
+new_case
+replace_once \
+  "src/ckp/outbox/store.py" \
+  '        if stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode):
+            try:
+                os.unlink(path)' \
+  '        if False and stat.S_ISLNK(value.st_mode):
+            try:
+                os.unlink(path)'
+expect_red \
+  "planted symlink strays reach quarantine" \
+  tests/test_outbox_store.py::test_symlinked_strays_are_swept_never_followed
+
 echo "==> review round-4 hardening guards"
 new_case
 replace_once \

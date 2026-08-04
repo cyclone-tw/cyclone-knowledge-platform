@@ -380,13 +380,26 @@ class OutboxStore:
         Destination names are probed with a counter and claimed via
         ``os.link``, which fails on an existing target, so repeated
         quarantines of the same name preserve every earlier artifact even
-        across concurrent holders of the two different store locks.
+        across concurrent holders of the two different store locks. A
+        planted symlink or special file is swept without ever being
+        followed: quarantine holds store-originated bytes only, never the
+        content of some external target.
         """
+        try:
+            value = path.lstat()
+        except OSError as exc:
+            raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED) from exc
+        if stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode):
+            try:
+                os.unlink(path)
+            except OSError as exc:
+                raise OutboxRefusal(OutboxErrorCode.STORAGE_FAILED) from exc
+            return
         for counter in range(1000):
             suffix = ".bin" if counter == 0 else f".{counter}.bin"
             destination = self._quarantine / (path.name + suffix)
             try:
-                os.link(path, destination)
+                os.link(path, destination, follow_symlinks=False)
             except FileExistsError:
                 continue
             except OSError as exc:
