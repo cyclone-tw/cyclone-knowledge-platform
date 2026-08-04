@@ -66,6 +66,12 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: bash scripts/test-c8-mutations.sh
 
+      - name: C4 embedding mutation matrix
+        if: matrix.python-version == '3.14'
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: bash scripts/test-c4-mutations.sh
+
   container:
     # Contract Phase 8 wants a cold rebuild on a different host to be routine.
     # Building from a clean checkout on a hosted runner is the cheapest

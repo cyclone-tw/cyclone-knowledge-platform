@@ -24,9 +24,15 @@ private editable copy of the other's contract.
 
 ## Status
 
-Phase 3 C7: the Writer contract is implemented for synthetic Git fixtures.
-Issue #12 adds an explicit local-only bridge to the existing Cyclone-Wiki Core
-inbox wrapper; it does not enable an HTTP Writer, Private writes or queuing.
+Phase 3, through C8: Catalog and Gateway read, auth scope and context packing,
+the Writer contract over synthetic Git fixtures with a local-only Cyclone-Wiki
+Core inbox bridge, and a durable encrypted outbox with replay.
+
+Issue #16 adds C4: provider-neutral embedding and reranker **interfaces** plus
+one deterministic offline hash provider. It is a frozen contract, not
+retrieval — nothing composes it yet, and no HTTP surface exposes it. C5 wires
+it to Qdrant and `index_revision`.
+
 See issue #1 (platform Epic) for the child map and dependency order.
 
 ## Quick start
