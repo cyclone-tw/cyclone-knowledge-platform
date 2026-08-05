@@ -29,6 +29,12 @@ tests/*
 !tests/test_outbox_privacy_routing.py
 !tests/test_outbox_replay.py
 !tests/test_outbox_recovery.py
+!tests/embedding_fixtures.py
+!tests/test_c4_contract.py
+!tests/test_embedding_models.py
+!tests/test_embedding_provider.py
+!tests/test_embedding_registry.py
+!tests/test_embedding_neutrality.py
 scripts
 config
 AGENTS.md

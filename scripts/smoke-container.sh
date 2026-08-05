@@ -585,3 +585,56 @@ docker run --rm --entrypoint python "$WRITER_IMAGE" \
   tests/test_outbox_recovery.py \
   tests/test_c8_contract.py
 echo "smoke: C8 synthetic outbox enqueue and replay matrix looks right"
+
+# C4 embedding contract on the deployment interpreter. Pure computation, so
+# it needs neither Git nor a running service -- only the same disposable
+# stage that already carries the dev dependencies.
+echo "==> C4 embedding and reranker interface smoke"
+docker run --rm --entrypoint python "$WRITER_IMAGE" \
+  -m pytest -q \
+  tests/test_embedding_models.py \
+  tests/test_embedding_provider.py \
+  tests/test_embedding_registry.py \
+  tests/test_embedding_neutrality.py \
+  tests/test_c4_contract.py
+echo "smoke: C4 embedding and reranker interfaces look right"
+
+# The strongest available proof that the shipped provider downloads no model
+# and calls no API: run it in the production image with the network removed
+# and require the frozen golden digest. A provider that reached for a network
+# would fail here rather than silently degrade.
+echo "==> C4 offline determinism in the runtime image (no network)"
+# `-i` is load-bearing: without it `docker run ... python -` gets an empty
+# stdin, prints nothing, and exits 0 -- a check that always passes. The
+# verdict line is required below so that failure mode cannot come back.
+offline_verdict="$(docker run --rm -i --network none --entrypoint python "$IMAGE" - <<'PY'
+import hashlib
+import struct
+import sys
+
+from ckp.embedding import HashEmbeddingProvider
+
+# Same constant as tests/test_embedding_provider.py, deliberately duplicated:
+# an independent copy is what makes this an outside check rather than an echo.
+GOLDEN = "67d72b59a5d87529b7a81e6a8ee7751c5c27f507774a6a59d91f475241408912"
+
+provider = HashEmbeddingProvider(dimension=64)
+values = provider.embed_query("手沖 咖啡 水溫 控制").values
+digest = hashlib.sha256(struct.pack(f"<{len(values)}d", *values)).hexdigest()
+if digest != GOLDEN:
+    print(f"smoke: offline embedding digest drifted: {digest}", file=sys.stderr)
+    sys.exit(1)
+if provider.descriptor.requires_network or not provider.descriptor.deterministic:
+    print("smoke: shipped provider descriptor is not offline-deterministic", file=sys.stderr)
+    sys.exit(1)
+print("smoke: C4 hash provider is byte-identical with no network at all")
+PY
+)"
+printf '%s\n' "$offline_verdict"
+case "$offline_verdict" in
+  *"byte-identical with no network at all"*) ;;
+  *)
+    echo "smoke: offline embedding check produced no verdict" >&2
+    exit 1
+    ;;
+esac
