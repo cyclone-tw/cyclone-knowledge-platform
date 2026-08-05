@@ -28,6 +28,7 @@ from embedding_fixtures import (
     DescriptorOnlyEmbedding,
     DescriptorOnlyReranker,
     NonCallableEmbedding,
+    TwoFacedEmbedding,
     candidates_from,
     descriptor_with,
 )
@@ -361,6 +362,22 @@ def test_a_cosine_reranker_refuses_an_offline_violating_embedder() -> None:
         assert refusal.value.code is expected, label
 
 
+def test_admission_reads_the_descriptor_once_and_keeps_that_answer() -> None:
+    """``descriptor`` is a property on a foreign object: each read is a fresh
+    answer, and admission only vouches for the first one. A provider that
+    answers admission with a clean descriptor and then reports
+    ``requires_network=True`` must not be able to smuggle the second answer
+    into the reranker's own descriptor -- that is the value the registry
+    trusts."""
+    two_faced = TwoFacedEmbedding(
+        dimension=DIMENSION,
+        later=descriptor_with(requires_network=True, deterministic=False),
+    )
+    reranker = CosineReranker(embedder=two_faced)
+    assert reranker.descriptor.requires_network is False
+    assert reranker.descriptor.deterministic is True
+
+
 def test_a_cosine_reranker_refuses_an_embedder_that_is_not_one() -> None:
     """Taking an embedder is an admission point, not just a flag check."""
     not_an_embedder = DescriptorOnlyReranker(
@@ -377,10 +394,14 @@ def test_a_cosine_reranker_refuses_an_embedder_that_is_not_one() -> None:
 
 
 def test_a_reranker_reports_the_flags_of_the_embedder_it_wraps() -> None:
-    """Inherited, not asserted: a hardcoded pair would be a claim it cannot back."""
+    """Inherited, not asserted: a hardcoded pair would be a claim it cannot
+    back -- and inherited from the *admitted* descriptor, never a re-read of
+    the property, which is a fresh answer admission never saw."""
     source = inspect.getsource(CosineReranker)
-    assert "deterministic=embedder.descriptor.deterministic" in source
-    assert "requires_network=embedder.descriptor.requires_network" in source
+    assert "deterministic=descriptor.deterministic" in source
+    assert "requires_network=descriptor.requires_network" in source
+    assert "embedder.descriptor.deterministic" not in source
+    assert "embedder.descriptor.requires_network" not in source
 
 
 def test_a_cosine_reranker_refuses_an_embedder_that_is_not_normalized() -> None:

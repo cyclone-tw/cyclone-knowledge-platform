@@ -401,8 +401,8 @@ expect_red \
 new_case
 replace_once \
   "src/ckp/embedding/hashing.py" \
-  '            deterministic=embedder.descriptor.deterministic,
-            requires_network=embedder.descriptor.requires_network,' \
+  '            deterministic=descriptor.deterministic,
+            requires_network=descriptor.requires_network,' \
   '            deterministic=True,
             requires_network=False,'
 expect_red \
@@ -418,6 +418,17 @@ expect_red \
   "a provider with non-callable methods registers cleanly" \
   tests/test_embedding_registry.py::test_a_provider_whose_methods_are_not_callable_cannot_be_registered \
   tests/test_embedding_provider.py::test_a_cosine_reranker_refuses_an_embedder_that_is_not_one
+
+new_case
+replace_once \
+  "src/ckp/embedding/hashing.py" \
+  '            deterministic=descriptor.deterministic,
+            requires_network=descriptor.requires_network,' \
+  '            deterministic=embedder.descriptor.deterministic,
+            requires_network=embedder.descriptor.requires_network,'
+expect_red \
+  "flags re-read from the property instead of the admitted descriptor" \
+  tests/test_embedding_provider.py::test_admission_reads_the_descriptor_once_and_keeps_that_answer
 
 new_case
 replace_once \

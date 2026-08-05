@@ -190,13 +190,17 @@ class CosineReranker:
             # For a reranker this reads as "scores come from unit vectors",
             # so they stay inside [-1, 1].
             normalized=True,
-            # Inherited, not asserted. The guard above already refuses a
-            # network or non-deterministic embedder, so these are False/True
-            # today -- but if that guard were ever removed, the descriptor
-            # would still report what this reranker can actually back, and
-            # the registry would reject it. A hardcoded pair would lie.
-            deterministic=embedder.descriptor.deterministic,
-            requires_network=embedder.descriptor.requires_network,
+            # Inherited, not asserted -- and inherited from the *validated*
+            # local, never by re-reading the property. ``descriptor`` is a
+            # property call on a foreign object: a second read is a second
+            # answer, and admission checked only the first one. The guard
+            # above already refuses a network or non-deterministic embedder,
+            # so these are False/True today -- but if that guard were ever
+            # removed, the descriptor would still report what this reranker
+            # can actually back, and the registry would reject it. A
+            # hardcoded pair would lie.
+            deterministic=descriptor.deterministic,
+            requires_network=descriptor.requires_network,
             semantic=False,
         )
 

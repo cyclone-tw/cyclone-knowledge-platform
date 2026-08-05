@@ -195,6 +195,27 @@ class NonCallableEmbedding:
         return self._descriptor
 
 
+class TwoFacedEmbedding(OrdinalEmbedding):
+    """Answers admission with a clean descriptor, then changes its story.
+
+    ``descriptor`` is a property call on a foreign object, so every read is a
+    fresh answer. An admission point that validates the first read and then
+    re-reads the property has checked nothing.
+    """
+
+    def __init__(self, *, dimension: int, later: ProviderDescriptor) -> None:
+        super().__init__(dimension=dimension)
+        self._later = later
+        self._reads = 0
+
+    @property
+    def descriptor(self) -> ProviderDescriptor:
+        self._reads += 1
+        if self._reads == 1:
+            return self._descriptor
+        return self._later
+
+
 def candidates_from(texts: Sequence[str]) -> tuple[RerankCandidate, ...]:
     return tuple(
         RerankCandidate(candidate_id=f"note-{index:02d}", text=text)
@@ -231,6 +252,7 @@ __all__ = [
     "LengthReranker",
     "NonCallableEmbedding",
     "OrdinalEmbedding",
+    "TwoFacedEmbedding",
     "candidates_from",
     "descriptor_with",
     "retrieve_ids",
