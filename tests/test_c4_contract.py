@@ -141,10 +141,12 @@ def test_default_app_composes_no_embedding_and_exposes_no_embedding_surface() ->
     )
 
 
-def test_no_other_package_depends_on_c4_yet() -> None:
-    """C5 wires the index. Until then this package is additive and revertible."""
+def test_only_the_c5_index_package_depends_on_c4() -> None:
+    """C5 (#18) is the sanctioned consumer; nothing else imports embeddings."""
     for path in sorted((REPO_ROOT / "src/ckp").rglob("*.py")):
         if PACKAGE in path.parents:
+            continue
+        if (REPO_ROOT / "src/ckp/index") in path.parents:
             continue
         assert "ckp.embedding" not in path.read_text(encoding="utf-8"), path.name
 

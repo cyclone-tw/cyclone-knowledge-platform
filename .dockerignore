@@ -35,6 +35,14 @@ tests/*
 !tests/test_embedding_provider.py
 !tests/test_embedding_registry.py
 !tests/test_embedding_neutrality.py
+!tests/index_fixtures.py
+!tests/test_index_models.py
+!tests/test_index_memory.py
+!tests/test_index_rebuild.py
+!tests/test_index_neutrality.py
+!tests/test_index_qdrant.py
+!tests/test_shadow_benchmark.py
+!tests/test_c5_contract.py
 scripts
 config
 AGENTS.md
