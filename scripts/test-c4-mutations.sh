@@ -153,6 +153,24 @@ expect_red \
   "query path diverges from the document path" \
   tests/test_embedding_provider.py::test_query_and_document_paths_are_bit_identical
 
+new_case
+replace_once \
+  "src/ckp/embedding/hashing.py" \
+  '_TOKEN = re.compile(r"[a-z0-9]+|[^\x00-\x7f" + re.escape(_IGNORED_NON_ASCII) + "]")' \
+  '_TOKEN = re.compile(r"[a-z0-9]+|[^\W_]")'
+expect_red \
+  "tokenizer back on a Unicode-database character class" \
+  tests/test_embedding_provider.py::test_the_tokenizer_reads_no_unicode_database
+
+new_case
+replace_once \
+  "src/ckp/embedding/hashing.py" \
+  '    return _TOKEN.findall(text.translate(_ASCII_FOLD))' \
+  '    return _TOKEN.findall(text.casefold())'
+expect_red \
+  "case folding back on the interpreter Unicode tables" \
+  tests/test_embedding_provider.py::test_the_tokenizer_reads_no_unicode_database
+
 echo "==> batch and input gates"
 new_case
 replace_once \
@@ -315,6 +333,90 @@ expect_red \
   "cosine reranker composed over a non-unit embedder" \
   tests/test_embedding_provider.py::test_a_cosine_reranker_refuses_an_embedder_that_is_not_normalized
 
+new_case
+replace_once \
+  "src/ckp/embedding/models.py" \
+  '    if descriptor.contract_version != EMBEDDING_CONTRACT:
+        raise ValueError("result descriptor must declare this contract version")' \
+  '    if False and descriptor.contract_version != EMBEDDING_CONTRACT:
+        raise ValueError("result descriptor must declare this contract version")'
+expect_red \
+  "a result can be stamped with a foreign contract version" \
+  tests/test_embedding_models.py::test_a_result_must_carry_this_contract_version
+
+new_case
+replace_once \
+  "src/ckp/embedding/models.py" \
+  '    if descriptor.kind is not kind:
+        raise ValueError(f"result descriptor must be of kind {kind.value}")' \
+  '    if False and descriptor.kind is not kind:
+        raise ValueError(f"result descriptor must be of kind {kind.value}")'
+expect_red \
+  "a result can be stamped with the other kind of descriptor" \
+  tests/test_embedding_models.py::test_a_result_must_carry_a_descriptor_of_its_own_kind
+
+new_case
+replace_once \
+  "src/ckp/embedding/models.py" \
+  '    def require_provider_version_shape(cls, value: str) -> str:
+        if _PROVIDER_VERSION.fullmatch(value) is None:' \
+  '    def require_provider_version_shape(cls, value: str) -> str:
+        if False and _PROVIDER_VERSION.fullmatch(value) is None:'
+expect_red \
+  "provider_version shape guard removed" \
+  tests/test_embedding_models.py::test_descriptor_rejects_a_provider_version_that_is_not_the_frozen_shape
+
+new_case
+replace_once \
+  "src/ckp/embedding/models.py" \
+  '    candidate_id: str = Field(min_length=1, max_length=256)
+    text: str
+
+    @field_validator("candidate_id")
+    @classmethod
+    def require_candidate_id_shape(cls, value: str) -> str:
+        if _CANDIDATE_ID.fullmatch(value) is None:' \
+  '    candidate_id: str = Field(min_length=1, max_length=256)
+    text: str
+
+    @field_validator("candidate_id")
+    @classmethod
+    def require_candidate_id_shape(cls, value: str) -> str:
+        if False and _CANDIDATE_ID.fullmatch(value) is None:'
+expect_red \
+  "candidate_id shape guard removed on the rerank input" \
+  tests/test_embedding_models.py::test_candidate_ids_must_match_the_frozen_id_pattern
+
+echo "==> the offline fence holds through composition"
+new_case
+replace_once \
+  "src/ckp/embedding/hashing.py" \
+  '        require_offline_provider(embedder.descriptor)' \
+  '        pass  # mutant lets a reranker wrap a cloud embedder'
+expect_red \
+  "reranker composed over a network or non-deterministic embedder" \
+  tests/test_embedding_provider.py::test_a_cosine_reranker_refuses_an_offline_violating_embedder
+
+new_case
+replace_once \
+  "src/ckp/embedding/hashing.py" \
+  '            deterministic=embedder.descriptor.deterministic,
+            requires_network=embedder.descriptor.requires_network,' \
+  '            deterministic=True,
+            requires_network=False,'
+expect_red \
+  "reranker asserts offline flags it cannot back instead of inheriting them" \
+  tests/test_embedding_provider.py::test_a_reranker_reports_the_flags_of_the_embedder_it_wraps
+
+new_case
+replace_once \
+  "src/ckp/embedding/registry.py" \
+  '        require_callable_interface(provider, methods)' \
+  '        pass  # mutant trusts hasattr alone'
+expect_red \
+  "a provider with non-callable methods registers cleanly" \
+  tests/test_embedding_registry.py::test_a_provider_whose_methods_are_not_callable_cannot_be_registered
+
 echo "==> registry fail-closed boundary"
 new_case
 replace_once \
@@ -330,7 +432,7 @@ expect_red \
 
 new_case
 replace_once \
-  "src/ckp/embedding/registry.py" \
+  "src/ckp/embedding/provider.py" \
   '    if descriptor.requires_network:' \
   '    if False and descriptor.requires_network:'
 expect_red \
@@ -339,7 +441,7 @@ expect_red \
 
 new_case
 replace_once \
-  "src/ckp/embedding/registry.py" \
+  "src/ckp/embedding/provider.py" \
   '    if not descriptor.deterministic:' \
   '    if False and not descriptor.deterministic:'
 expect_red \
@@ -348,7 +450,7 @@ expect_red \
 
 new_case
 replace_once \
-  "src/ckp/embedding/registry.py" \
+  "src/ckp/embedding/provider.py" \
   '    if descriptor.contract_version != EMBEDDING_CONTRACT:' \
   '    if False and descriptor.contract_version != EMBEDDING_CONTRACT:'
 expect_red \
@@ -418,9 +520,9 @@ expect_red \
 new_case
 replace_once \
   "src/ckp/embedding/registry.py" \
-  'from ckp.embedding.models import EMBEDDING_CONTRACT, ProviderDescriptor, ProviderKind' \
+  'from ckp.embedding.models import ProviderDescriptor, ProviderKind' \
   'from ckp.embedding.hashing import HASH_EMBEDDING_ID  # noqa: F401
-from ckp.embedding.models import EMBEDDING_CONTRACT, ProviderDescriptor, ProviderKind'
+from ckp.embedding.models import ProviderDescriptor, ProviderKind'
 expect_red \
   "the abstraction layer learned the name of a concrete provider" \
   tests/test_embedding_neutrality.py::test_the_abstraction_layer_does_not_know_any_concrete_provider

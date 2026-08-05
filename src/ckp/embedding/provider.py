@@ -14,13 +14,48 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
+from ckp.embedding.errors import EmbeddingErrorCode, EmbeddingRefusal
 from ckp.embedding.models import (
+    EMBEDDING_CONTRACT,
     EmbeddingBatch,
     EmbeddingVector,
     ProviderDescriptor,
     RerankCandidate,
     RerankResult,
 )
+
+#: The methods each kind of provider owes, checked for callability rather
+#: than mere presence: ``runtime_checkable`` only asks ``hasattr``, so
+#: ``embed_query = None`` would otherwise pass as an embedding provider and
+#: fail at the first query instead of at registration.
+EMBEDDING_METHODS = ("embed_documents", "embed_query")
+RERANKER_METHODS = ("rerank",)
+
+
+def require_offline_provider(descriptor: ProviderDescriptor) -> None:
+    """The Phase 3 offline boundary, in one place.
+
+    It is enforced at registration *and* wherever one provider is composed
+    into another. Checking only the outer descriptor would let a reranker
+    wrap a network-calling embedder and still register as offline -- the
+    reranker's own flags would be a lie it never had to back.
+    """
+    if descriptor.contract_version != EMBEDDING_CONTRACT:
+        raise EmbeddingRefusal(EmbeddingErrorCode.CONTRACT_VERSION_UNKNOWN)
+    if descriptor.requires_network:
+        # Phase 3 non-goal: no cloud provider, no model download.
+        raise EmbeddingRefusal(EmbeddingErrorCode.NETWORK_PROVIDER_DENIED)
+    if not descriptor.deterministic:
+        # A non-recomputable vector cannot back a recomputable
+        # ``index_revision`` (contract §5.5).
+        raise EmbeddingRefusal(EmbeddingErrorCode.NONDETERMINISTIC_PROVIDER_DENIED)
+
+
+def require_callable_interface(provider: object, methods: tuple[str, ...]) -> None:
+    """Every declared method must actually be callable on this object."""
+    for method in methods:
+        if not callable(getattr(provider, method, None)):
+            raise EmbeddingRefusal(EmbeddingErrorCode.PROVIDER_KIND_MISMATCH)
 
 
 @runtime_checkable
@@ -74,6 +109,10 @@ class RerankerProvider(Protocol):
 
 
 __all__ = [
+    "EMBEDDING_METHODS",
+    "RERANKER_METHODS",
     "EmbeddingProvider",
     "RerankerProvider",
+    "require_callable_interface",
+    "require_offline_provider",
 ]

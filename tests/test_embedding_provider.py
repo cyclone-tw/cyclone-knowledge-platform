@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import struct
@@ -13,6 +14,7 @@ import pytest
 
 from ckp.embedding.errors import EmbeddingErrorCode, EmbeddingRefusal
 from ckp.embedding.hashing import (
+    _TOKEN,
     COSINE_RERANKER_ID,
     HASH_EMBEDDING_ID,
     CosineReranker,
@@ -21,7 +23,12 @@ from ckp.embedding.hashing import (
 )
 from ckp.embedding.models import ProviderKind, RerankCandidate, require_text
 from ckp.embedding.provider import EmbeddingProvider, RerankerProvider
-from embedding_fixtures import SAMPLE_TEXTS, candidates_from
+from embedding_fixtures import (
+    SAMPLE_TEXTS,
+    DescriptorOnlyEmbedding,
+    candidates_from,
+    descriptor_with,
+)
 
 DIMENSION = 64
 
@@ -122,6 +129,34 @@ def test_traditional_chinese_is_tokenized_per_character_not_dropped() -> None:
     coffee = provider.embed_query("手沖 咖啡 水溫")
     teaching = provider.embed_query("特教 個別化 計畫")
     assert coffee.values != teaching.values
+
+
+def test_the_tokenizer_reads_no_unicode_database() -> None:
+    """``\\w``/``\\s``/``\\d`` and ``casefold`` change between Unicode releases.
+
+    A character assigned in a later Unicode version would then tokenize on one
+    interpreter and be ignored on another, so the same note would vectorize
+    differently on Python 3.12 and 3.14 -- with nothing in the golden digests
+    to notice, because they only cover characters assigned years ago.
+    """
+    for unicode_class in (r"\w", r"\W", r"\s", r"\S", r"\d", r"\D", r"\b"):
+        assert unicode_class not in _TOKEN.pattern
+    source = inspect.getsource(tokenize)
+    assert "casefold" not in source
+    assert ".lower(" not in source
+
+
+def test_case_folding_is_ascii_only_and_declared_as_such() -> None:
+    assert tokenize("KETTLE Brew") == ["kettle", "brew"]
+    # Non-ASCII case is deliberately *not* folded: doing so would read the
+    # interpreter's Unicode case tables. Both forms are still tokenized.
+    assert tokenize("Ölkanne") == ["Ö", "lkanne"]
+    assert tokenize("ölkanne") == ["ö", "lkanne"]
+
+
+def test_cjk_punctuation_is_ignored_while_cjk_text_is_kept() -> None:
+    assert tokenize("手沖，咖啡。「水溫」") == ["手", "沖", "咖", "啡", "水", "溫"]
+    assert tokenize("　​。、（）") == []
 
 
 def test_empty_untokenizable_and_non_text_inputs_fail_closed() -> None:
@@ -257,6 +292,41 @@ def test_top_k_is_keyword_only() -> None:
     reranker = _reranker()
     with pytest.raises(TypeError):
         reranker.rerank("kettle", candidates_from(("kettle",)), 1)  # type: ignore[misc]
+
+
+def test_a_cosine_reranker_refuses_an_offline_violating_embedder() -> None:
+    """The fence has to hold where one provider is composed into another.
+
+    Checking it only at registration would let a reranker wrap a cloud client
+    and still register as offline: the registry sees the reranker's own
+    descriptor, which says requires_network=False.
+    """
+    cases = {
+        "requires_network": (
+            {"requires_network": True},
+            EmbeddingErrorCode.NETWORK_PROVIDER_DENIED,
+        ),
+        "deterministic": (
+            {"deterministic": False},
+            EmbeddingErrorCode.NONDETERMINISTIC_PROVIDER_DENIED,
+        ),
+        "contract_version": (
+            {"contract_version": "embedding/v9"},
+            EmbeddingErrorCode.CONTRACT_VERSION_UNKNOWN,
+        ),
+    }
+    for label, (overrides, expected) in cases.items():
+        embedder = DescriptorOnlyEmbedding(descriptor_with(**overrides))
+        with pytest.raises(EmbeddingRefusal) as refusal:
+            CosineReranker(embedder=embedder)
+        assert refusal.value.code is expected, label
+
+
+def test_a_reranker_reports_the_flags_of_the_embedder_it_wraps() -> None:
+    """Inherited, not asserted: a hardcoded pair would be a claim it cannot back."""
+    source = inspect.getsource(CosineReranker)
+    assert "deterministic=embedder.descriptor.deterministic" in source
+    assert "requires_network=embedder.descriptor.requires_network" in source
 
 
 def test_a_cosine_reranker_refuses_an_embedder_that_is_not_normalized() -> None:

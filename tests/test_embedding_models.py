@@ -14,6 +14,7 @@ from ckp.embedding.models import (
     ProviderDescriptor,
     ProviderKind,
     RankedCandidate,
+    RerankCandidate,
     RerankResult,
     SimilarityMetric,
     compute_provider_revision,
@@ -46,6 +47,21 @@ def test_descriptor_rejects_a_provider_id_that_is_not_the_frozen_shape() -> None
     for bad in ("Upper", "has space", "-leading", ""):
         with pytest.raises(ValidationError):
             descriptor_with(provider_id=bad)
+
+
+def test_descriptor_rejects_a_provider_version_that_is_not_the_frozen_shape() -> None:
+    """The version is part of the revision, so it has to be a stable token."""
+    for bad in ("Bad Version", "1 .0", "-1", ""):
+        with pytest.raises(ValidationError):
+            descriptor_with(provider_version=bad)
+
+
+def test_candidate_ids_must_match_the_frozen_id_pattern() -> None:
+    for bad in ("note with space", "-leading", "note\n01", ""):
+        with pytest.raises(ValidationError):
+            RerankCandidate(candidate_id=bad, text="kettle")
+        with pytest.raises(ValidationError):
+            RankedCandidate(candidate_id=bad, score=0.5, rank=0)
 
 
 def test_provider_revision_changes_when_any_varying_field_changes() -> None:
@@ -116,6 +132,34 @@ def test_a_normalized_provider_cannot_return_a_non_unit_vector() -> None:
         # A zero vector has no direction; it is the shape a dropped
         # normalization or an invented fallback would take.
         EmbeddingVector(descriptor=descriptor, values=(0.0, 0.0))
+
+
+def test_a_result_must_carry_a_descriptor_of_its_own_kind() -> None:
+    """These models are the v1 shapes; a result stamped with someone else's
+    descriptor would advertise a provider identity that never produced it."""
+    reranker_descriptor = descriptor_with(kind=ProviderKind.RERANKER, dimension=None)
+    embedding_descriptor = descriptor_with(dimension=2, normalized=False)
+    with pytest.raises(ValidationError):
+        EmbeddingVector(descriptor=reranker_descriptor, values=(0.5, 0.5))
+    with pytest.raises(ValidationError):
+        EmbeddingBatch(descriptor=reranker_descriptor, vectors=((0.5, 0.5),))
+    with pytest.raises(ValidationError):
+        RerankResult(descriptor=embedding_descriptor, ranked=())
+
+
+def test_a_result_must_carry_this_contract_version() -> None:
+    foreign_embedding = descriptor_with(
+        contract_version="embedding/v9", dimension=2, normalized=False
+    )
+    foreign_reranker = descriptor_with(
+        contract_version="embedding/v9", kind=ProviderKind.RERANKER, dimension=None
+    )
+    with pytest.raises(ValidationError):
+        EmbeddingVector(descriptor=foreign_embedding, values=(0.5, 0.5))
+    with pytest.raises(ValidationError):
+        EmbeddingBatch(descriptor=foreign_embedding, vectors=((0.5, 0.5),))
+    with pytest.raises(ValidationError):
+        RerankResult(descriptor=foreign_reranker, ranked=())
 
 
 def test_batch_rows_carry_the_batch_descriptor_when_detached() -> None:

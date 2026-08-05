@@ -129,6 +129,21 @@ def _flag(value: bool) -> bytes:
     return b"1" if value else b"0"
 
 
+def _require_result_descriptor(
+    descriptor: ProviderDescriptor, kind: ProviderKind
+) -> None:
+    """These models *are* the v1 shapes, so a result must be a v1 result.
+
+    Without this a reranker could return a result stamped with an embedding
+    descriptor, or with ``embedding/v9``, and every consumer downstream would
+    read a provider identity that never produced these numbers.
+    """
+    if descriptor.contract_version != EMBEDDING_CONTRACT:
+        raise ValueError("result descriptor must declare this contract version")
+    if descriptor.kind is not kind:
+        raise ValueError(f"result descriptor must be of kind {kind.value}")
+
+
 def _validate_row(values: tuple[float, ...], descriptor: ProviderDescriptor) -> None:
     if descriptor.dimension is None or len(values) != descriptor.dimension:
         raise ValueError("vector length must equal the declared dimension")
@@ -150,6 +165,7 @@ class EmbeddingVector(BaseModel):
 
     @model_validator(mode="after")
     def require_declared_shape(self) -> EmbeddingVector:
+        _require_result_descriptor(self.descriptor, ProviderKind.EMBEDDING)
         _validate_row(self.values, self.descriptor)
         return self
 
@@ -164,6 +180,7 @@ class EmbeddingBatch(BaseModel):
 
     @model_validator(mode="after")
     def require_declared_shape(self) -> EmbeddingBatch:
+        _require_result_descriptor(self.descriptor, ProviderKind.EMBEDDING)
         for row in self.vectors:
             _validate_row(row, self.descriptor)
         return self
@@ -223,6 +240,7 @@ class RerankResult(BaseModel):
 
     @model_validator(mode="after")
     def require_frozen_total_order(self) -> RerankResult:
+        _require_result_descriptor(self.descriptor, ProviderKind.RERANKER)
         seen: set[str] = set()
         for position, item in enumerate(self.ranked):
             if item.rank != position:

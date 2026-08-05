@@ -9,26 +9,24 @@ every rejection has a stable code.
 from __future__ import annotations
 
 from ckp.embedding.errors import EmbeddingErrorCode, EmbeddingRefusal
-from ckp.embedding.models import EMBEDDING_CONTRACT, ProviderDescriptor, ProviderKind
-from ckp.embedding.provider import EmbeddingProvider, RerankerProvider
+from ckp.embedding.models import ProviderDescriptor, ProviderKind
+from ckp.embedding.provider import (
+    EMBEDDING_METHODS,
+    RERANKER_METHODS,
+    EmbeddingProvider,
+    RerankerProvider,
+    require_callable_interface,
+    require_offline_provider,
+)
 
 _NAME_MAX = 64
 
 
 def _require_registrable(descriptor: ProviderDescriptor, kind: ProviderKind) -> None:
-    """The Phase 3 offline boundary, checked at registration, not at query."""
-    if descriptor.contract_version != EMBEDDING_CONTRACT:
-        raise EmbeddingRefusal(EmbeddingErrorCode.CONTRACT_VERSION_UNKNOWN)
+    """The registration boundary: right kind, and inside the Phase 3 fence."""
     if descriptor.kind is not kind:
         raise EmbeddingRefusal(EmbeddingErrorCode.PROVIDER_KIND_MISMATCH)
-    if descriptor.requires_network:
-        # Phase 3 non-goal: no cloud provider, no model download. This is the
-        # single place that decision is enforced, so C5 cannot reach around it.
-        raise EmbeddingRefusal(EmbeddingErrorCode.NETWORK_PROVIDER_DENIED)
-    if not descriptor.deterministic:
-        # A non-deterministic provider cannot back a recomputable
-        # ``index_revision`` (contract §5.5).
-        raise EmbeddingRefusal(EmbeddingErrorCode.NONDETERMINISTIC_PROVIDER_DENIED)
+    require_offline_provider(descriptor)
 
 
 class ProviderRegistry:
@@ -67,10 +65,13 @@ class ProviderRegistry:
             raise EmbeddingRefusal(EmbeddingErrorCode.PROVIDER_UNKNOWN)
         if kind is ProviderKind.EMBEDDING:
             expected: type = EmbeddingProvider
+            methods = EMBEDDING_METHODS
         else:
             expected = RerankerProvider
+            methods = RERANKER_METHODS
         if not isinstance(provider, expected):
             raise EmbeddingRefusal(EmbeddingErrorCode.PROVIDER_KIND_MISMATCH)
+        require_callable_interface(provider, methods)
         descriptor = getattr(provider, "descriptor", None)
         if not isinstance(descriptor, ProviderDescriptor):
             raise EmbeddingRefusal(EmbeddingErrorCode.DESCRIPTOR_INVALID)

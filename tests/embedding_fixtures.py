@@ -174,6 +174,27 @@ class DescriptorOnlyReranker(DescriptorOnlyEmbedding):
         raise AssertionError("registration must fail before any call")
 
 
+class NonCallableEmbedding:
+    """Has every attribute the protocol names, none of them callable.
+
+    Values are deliberately not ``None``: a runtime protocol check special-
+    cases ``None`` for method members and would reject that on its own. Any
+    other non-callable value sails straight through ``isinstance``, so this
+    is what an isinstance-only registration would admit -- and then fail on
+    at the first query, with the provider already in the index path.
+    """
+
+    embed_documents = "not a method"
+    embed_query = 42
+
+    def __init__(self, descriptor: ProviderDescriptor) -> None:
+        self._descriptor = descriptor
+
+    @property
+    def descriptor(self) -> ProviderDescriptor:
+        return self._descriptor
+
+
 def candidates_from(texts: Sequence[str]) -> tuple[RerankCandidate, ...]:
     return tuple(
         RerankCandidate(candidate_id=f"note-{index:02d}", text=text)
@@ -208,6 +229,7 @@ __all__ = [
     "DescriptorOnlyEmbedding",
     "DescriptorOnlyReranker",
     "LengthReranker",
+    "NonCallableEmbedding",
     "OrdinalEmbedding",
     "candidates_from",
     "descriptor_with",

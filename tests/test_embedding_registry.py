@@ -16,6 +16,7 @@ from embedding_fixtures import (
     DescriptorOnlyEmbedding,
     DescriptorOnlyReranker,
     LengthReranker,
+    NonCallableEmbedding,
     OrdinalEmbedding,
     descriptor_with,
 )
@@ -104,6 +105,20 @@ def test_a_provider_cannot_be_registered_into_the_wrong_slot() -> None:
             "mislabelled", DescriptorOnlyEmbedding(reranker_descriptor)
         )
     assert refusal.value.code is EmbeddingErrorCode.PROVIDER_KIND_MISMATCH
+
+
+def test_a_provider_whose_methods_are_not_callable_cannot_be_registered() -> None:
+    """``runtime_checkable`` asks ``hasattr``, not ``callable``.
+
+    Without an explicit check this registers cleanly and blows up at the
+    first query instead -- at which point the wrong provider is already in
+    the index path.
+    """
+    registry = ProviderRegistry()
+    with pytest.raises(EmbeddingRefusal) as refusal:
+        registry.register_embedding("hollow", NonCallableEmbedding(descriptor_with()))
+    assert refusal.value.code is EmbeddingErrorCode.PROVIDER_KIND_MISMATCH
+    assert registry.embedding_names() == ()
 
 
 def test_an_object_missing_the_interface_cannot_be_registered() -> None:

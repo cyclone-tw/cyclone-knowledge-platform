@@ -27,7 +27,7 @@ from ckp.embedding.models import (
     SimilarityMetric,
     require_text,
 )
-from ckp.embedding.provider import EmbeddingProvider
+from ckp.embedding.provider import EmbeddingProvider, require_offline_provider
 
 HASH_EMBEDDING_ID = "hash-sha256"
 COSINE_RERANKER_ID = "cosine-rerank"
@@ -35,17 +35,41 @@ PROVIDER_VERSION = "1"
 
 _TOKEN_DOMAIN = b"ckp-embedding-hash-token-v1"
 
-#: Frozen tokenizer: ASCII alphanumeric runs, plus every other single word
-#: character on its own. The second branch is what keeps Traditional Chinese
-#: from being silently dropped -- a whitespace tokenizer would map a whole
-#: Chinese note to one token. Punctuation matches neither branch and is
-#: ignored. Changing this changes every vector, so it is versioned by
+#: ASCII-only case folding, as an explicit table. ``str.casefold`` and
+#: ``str.lower`` read the interpreter's Unicode case tables, which gain
+#: entries between Unicode releases -- the same note would then vectorize
+#: differently on two Python versions.
+_ASCII_FOLD = {codepoint: codepoint + 32 for codepoint in range(ord("A"), ord("Z") + 1)}
+
+#: Non-ASCII characters that carry no retrieval signal: ideographic and
+#: fullwidth space, and the punctuation Chinese prose is full of. Frozen as a
+#: literal for the same reason as the fold table -- deciding "is this
+#: punctuation?" from ``unicodedata`` would make tokenization depend on which
+#: Unicode version the interpreter was built against.
+_IGNORED_NON_ASCII = (
+    # Spaces and zero-width marks, spelled out so the set is auditable.
+    "\u00a0\u2002\u2003\u2009\u200b\u200c\u200d\u3000\ufeff"
+    # CJK and fullwidth punctuation.
+    "\u3001\u3002\uff0c\uff0e\u00b7\uff1b\uff1a\uff1f\uff01"
+    "\u2026\u2025\u2014\u2015\uff5e\uff0d"
+    "\u300c\u300d\u300e\u300f\uff08\uff09\u3008\u3009"
+    "\u300a\u300b\u3010\u3011\u3014\u3015\u3016\u3017"
+    "\u201c\u201d\u2018\u2019"
+)
+
+#: Frozen tokenizer, defined purely by codepoint ranges: runs of ASCII
+#: alphanumerics, plus every other single non-ASCII character on its own. The
+#: second branch is what keeps Traditional Chinese from being dropped -- a
+#: whitespace tokenizer would map a whole Chinese note to one token. It
+#: deliberately uses no ``\w``/``\s``/``\d`` class, because those are
+#: Unicode-database-driven and therefore interpreter-version-dependent.
+#: Changing any of this changes every vector, so it is versioned by
 #: ``PROVIDER_VERSION`` rather than tuned in place.
-_TOKEN = re.compile(r"[a-z0-9]+|[^\W_]")
+_TOKEN = re.compile(r"[a-z0-9]+|[^\x00-\x7f" + re.escape(_IGNORED_NON_ASCII) + "]")
 
 
 def tokenize(text: str) -> list[str]:
-    return _TOKEN.findall(text.casefold())
+    return _TOKEN.findall(text.translate(_ASCII_FOLD))
 
 
 class HashEmbeddingProvider:
@@ -125,6 +149,11 @@ class CosineReranker:
     """
 
     def __init__(self, *, embedder: EmbeddingProvider) -> None:
+        # A reranker is only as offline and as reproducible as the embedder
+        # inside it. Without this the registry would check the reranker's own
+        # descriptor, see requires_network=False, and admit a wrapped cloud
+        # client (AGENTS.md §9: same root cause, other point on the path).
+        require_offline_provider(embedder.descriptor)
         if not embedder.descriptor.normalized:
             # Unit vectors are what makes the dot product a cosine. Rather
             # than dividing by a norm that might be zero, refuse the
@@ -141,8 +170,13 @@ class CosineReranker:
             # For a reranker this reads as "scores come from unit vectors",
             # so they stay inside [-1, 1].
             normalized=True,
-            deterministic=True,
-            requires_network=False,
+            # Inherited, not asserted. The guard above already refuses a
+            # network or non-deterministic embedder, so these are False/True
+            # today -- but if that guard were ever removed, the descriptor
+            # would still report what this reranker can actually back, and
+            # the registry would reject it. A hardcoded pair would lie.
+            deterministic=embedder.descriptor.deterministic,
+            requires_network=embedder.descriptor.requires_network,
             semantic=False,
         )
 
