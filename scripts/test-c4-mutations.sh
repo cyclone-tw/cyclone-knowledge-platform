@@ -165,8 +165,8 @@ expect_red \
 new_case
 replace_once \
   "src/ckp/embedding/hashing.py" \
-  '    return _TOKEN.findall(text.translate(_ASCII_FOLD))' \
-  '    return _TOKEN.findall(text.casefold())'
+  '    return _TOKEN.findall(normalized.translate(_ASCII_FOLD))' \
+  '    return _TOKEN.findall(normalized.casefold())'
 expect_red \
   "case folding back on the interpreter Unicode tables" \
   tests/test_embedding_provider.py::test_the_tokenizer_reads_no_unicode_database
@@ -327,8 +327,8 @@ expect_red \
 new_case
 replace_once \
   "src/ckp/embedding/hashing.py" \
-  '        if not embedder.descriptor.normalized:' \
-  '        if False and not embedder.descriptor.normalized:'
+  '        if not descriptor.normalized:' \
+  '        if False and not descriptor.normalized:'
 expect_red \
   "cosine reranker composed over a non-unit embedder" \
   tests/test_embedding_provider.py::test_a_cosine_reranker_refuses_an_embedder_that_is_not_normalized
@@ -391,11 +391,12 @@ echo "==> the offline fence holds through composition"
 new_case
 replace_once \
   "src/ckp/embedding/hashing.py" \
-  '        require_offline_provider(embedder.descriptor)' \
-  '        pass  # mutant lets a reranker wrap a cloud embedder'
+  '        descriptor = require_provider(embedder, ProviderKind.EMBEDDING)' \
+  '        descriptor = embedder.descriptor  # mutant skips embedder admission'
 expect_red \
-  "reranker composed over a network or non-deterministic embedder" \
-  tests/test_embedding_provider.py::test_a_cosine_reranker_refuses_an_offline_violating_embedder
+  "reranker admits any embedder: cloud, non-deterministic, or not one at all" \
+  tests/test_embedding_provider.py::test_a_cosine_reranker_refuses_an_offline_violating_embedder \
+  tests/test_embedding_provider.py::test_a_cosine_reranker_refuses_an_embedder_that_is_not_one
 
 new_case
 replace_once \
@@ -410,12 +411,49 @@ expect_red \
 
 new_case
 replace_once \
-  "src/ckp/embedding/registry.py" \
-  '        require_callable_interface(provider, methods)' \
-  '        pass  # mutant trusts hasattr alone'
+  "src/ckp/embedding/provider.py" \
+  '        if not callable(getattr(provider, method, None)):' \
+  '        if False and not callable(getattr(provider, method, None)):'
 expect_red \
   "a provider with non-callable methods registers cleanly" \
-  tests/test_embedding_registry.py::test_a_provider_whose_methods_are_not_callable_cannot_be_registered
+  tests/test_embedding_registry.py::test_a_provider_whose_methods_are_not_callable_cannot_be_registered \
+  tests/test_embedding_provider.py::test_a_cosine_reranker_refuses_an_embedder_that_is_not_one
+
+new_case
+replace_once \
+  "src/ckp/embedding/models.py" \
+  '        value.encode("utf-8")' \
+  '        pass  # mutant lets an unencodable string through'
+expect_red \
+  "a lone surrogate escapes as UnicodeEncodeError instead of a coded refusal" \
+  tests/test_embedding_provider.py::test_text_that_cannot_be_encoded_fails_closed_with_a_code
+
+new_case
+replace_once \
+  "src/ckp/embedding/hashing.py" \
+  '    normalized = unicodedata.normalize("NFC", text)' \
+  '    normalized = text  # mutant drops canonical normalization'
+expect_red \
+  "NFD text vectorizes differently from the same text in NFC" \
+  tests/test_embedding_provider.py::test_composed_and_decomposed_text_embed_identically
+
+new_case
+replace_once \
+  "src/ckp/embedding/composition.py" \
+  '        embedding_descriptor = require_provider(self.embedding, ProviderKind.EMBEDDING)' \
+  '        embedding_descriptor = self.embedding.descriptor  # mutant trusts the caller'
+expect_red \
+  "a stack can be assembled around an unadmitted provider" \
+  tests/test_embedding_registry.py::test_a_stack_validates_itself_rather_than_trusting_its_builder
+
+new_case
+replace_once \
+  "src/ckp/embedding/composition.py" \
+  '            if revision != compute_provider_revision(descriptor):' \
+  '            if False and revision != compute_provider_revision(descriptor):'
+expect_red \
+  "a stack can carry a revision its own descriptor cannot reproduce" \
+  tests/test_embedding_registry.py::test_a_stack_validates_itself_rather_than_trusting_its_builder
 
 echo "==> registry fail-closed boundary"
 new_case
@@ -459,7 +497,7 @@ expect_red \
 
 new_case
 replace_once \
-  "src/ckp/embedding/registry.py" \
+  "src/ckp/embedding/provider.py" \
   '    if descriptor.kind is not kind:' \
   '    if False and descriptor.kind is not kind:'
 expect_red \
@@ -520,9 +558,9 @@ expect_red \
 new_case
 replace_once \
   "src/ckp/embedding/registry.py" \
-  'from ckp.embedding.models import ProviderDescriptor, ProviderKind' \
+  'from ckp.embedding.models import ProviderKind' \
   'from ckp.embedding.hashing import HASH_EMBEDDING_ID  # noqa: F401
-from ckp.embedding.models import ProviderDescriptor, ProviderKind'
+from ckp.embedding.models import ProviderKind'
 expect_red \
   "the abstraction layer learned the name of a concrete provider" \
   tests/test_embedding_neutrality.py::test_the_abstraction_layer_does_not_know_any_concrete_provider

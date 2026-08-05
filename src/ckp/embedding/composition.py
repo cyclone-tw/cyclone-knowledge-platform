@@ -10,20 +10,41 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ckp.embedding.errors import EmbeddingErrorCode, EmbeddingRefusal
 from ckp.embedding.hashing import CosineReranker, HashEmbeddingProvider
-from ckp.embedding.models import compute_provider_revision
-from ckp.embedding.provider import EmbeddingProvider, RerankerProvider
+from ckp.embedding.models import ProviderKind, compute_provider_revision
+from ckp.embedding.provider import (
+    EmbeddingProvider,
+    RerankerProvider,
+    require_provider,
+)
 from ckp.embedding.registry import ProviderRegistry
 
 
 @dataclass(frozen=True)
 class EmbeddingStack:
-    """A resolved pair plus the revisions C5 folds into ``index_revision``."""
+    """A resolved pair plus the revisions C5 folds into ``index_revision``.
+
+    It validates itself rather than trusting the builder below. C5 will hold
+    one of these, and a stack assembled by hand around a network provider --
+    or carrying a revision string that does not match its own descriptor --
+    would hand ``index_revision`` a value nothing can recompute.
+    """
 
     embedding: EmbeddingProvider
     reranker: RerankerProvider
     embedding_revision: str
     reranker_revision: str
+
+    def __post_init__(self) -> None:
+        embedding_descriptor = require_provider(self.embedding, ProviderKind.EMBEDDING)
+        reranker_descriptor = require_provider(self.reranker, ProviderKind.RERANKER)
+        for revision, descriptor in (
+            (self.embedding_revision, embedding_descriptor),
+            (self.reranker_revision, reranker_descriptor),
+        ):
+            if revision != compute_provider_revision(descriptor):
+                raise EmbeddingRefusal(EmbeddingErrorCode.DESCRIPTOR_INVALID)
 
 
 def build_c4_deterministic_registry(

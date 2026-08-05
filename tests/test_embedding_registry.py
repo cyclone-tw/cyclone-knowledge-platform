@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from ckp.embedding.composition import (
+    EmbeddingStack,
     build_c4_deterministic_registry,
     build_c4_deterministic_stack,
 )
@@ -163,6 +164,44 @@ def test_the_c4_builders_resolve_through_the_registry() -> None:
     assert registry.reranker_names() == ("r",)
     with pytest.raises(EmbeddingRefusal):
         registry.resolve_embedding("hash")
+
+
+def test_a_stack_validates_itself_rather_than_trusting_its_builder() -> None:
+    """C5 will hold one of these; a hand-assembled stack is still an admission."""
+    good = build_c4_deterministic_stack(
+        dimension=DIMENSION,
+        embedding_name="hash",
+        reranker_name="cosine",
+    )
+    # A revision that does not match its own descriptor cannot be recomputed
+    # by anything downstream, so it is not a revision.
+    with pytest.raises(EmbeddingRefusal) as refusal:
+        EmbeddingStack(
+            embedding=good.embedding,
+            reranker=good.reranker,
+            embedding_revision="sha256:" + "0" * 64,
+            reranker_revision=good.reranker_revision,
+        )
+    assert refusal.value.code is EmbeddingErrorCode.DESCRIPTOR_INVALID
+
+    network_embedder = DescriptorOnlyEmbedding(descriptor_with(requires_network=True))
+    with pytest.raises(EmbeddingRefusal) as refusal:
+        EmbeddingStack(
+            embedding=network_embedder,
+            reranker=good.reranker,
+            embedding_revision=compute_provider_revision(network_embedder.descriptor),
+            reranker_revision=good.reranker_revision,
+        )
+    assert refusal.value.code is EmbeddingErrorCode.NETWORK_PROVIDER_DENIED
+
+    # Swapped slots: an embedding provider is not a reranker.
+    with pytest.raises(EmbeddingRefusal):
+        EmbeddingStack(
+            embedding=good.embedding,
+            reranker=good.embedding,  # type: ignore[arg-type]
+            embedding_revision=good.embedding_revision,
+            reranker_revision=good.embedding_revision,
+        )
 
 
 def test_the_builders_take_no_positional_arguments() -> None:

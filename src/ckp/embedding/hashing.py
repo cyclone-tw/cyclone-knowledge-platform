@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import unicodedata
 from collections.abc import Sequence
 
 from ckp.embedding.errors import EmbeddingErrorCode, EmbeddingRefusal
@@ -27,7 +28,7 @@ from ckp.embedding.models import (
     SimilarityMetric,
     require_text,
 )
-from ckp.embedding.provider import EmbeddingProvider, require_offline_provider
+from ckp.embedding.provider import EmbeddingProvider, require_provider
 
 HASH_EMBEDDING_ID = "hash-sha256"
 COSINE_RERANKER_ID = "cosine-rerank"
@@ -55,6 +56,11 @@ _IGNORED_NON_ASCII = (
     "\u300c\u300d\u300e\u300f\uff08\uff09\u3008\u3009"
     "\u300a\u300b\u3010\u3011\u3014\u3015\u3016\u3017"
     "\u201c\u201d\u2018\u2019"
+    # Bullets and separators. The set is deliberately finite: deciding
+    # "is this punctuation?" from unicodedata would put tokenization back on
+    # a moving table. Anything not listed becomes its own token, which costs
+    # one noisy bucket and never drops real text.
+    "\u2022\u2023\u2027\u2043\u30fb\uff65\u2010\u2011\u2012\u2013"
 )
 
 #: Frozen tokenizer, defined purely by codepoint ranges: runs of ASCII
@@ -69,7 +75,19 @@ _TOKEN = re.compile(r"[a-z0-9]+|[^\x00-\x7f" + re.escape(_IGNORED_NON_ASCII) + "
 
 
 def tokenize(text: str) -> list[str]:
-    return _TOKEN.findall(text.translate(_ASCII_FOLD))
+    r"""Normalize to NFC, fold ASCII case, then split on the frozen classes.
+
+    NFC matters because the same Chinese or accented text arrives decomposed
+    from macOS and composed from almost everywhere else; without it
+    ``"caf\u00e9"`` and ``"cafe\u0301"`` land in different buckets and a note
+    stops matching its own query. Normalization is the one Unicode table this
+    provider does consult, and it is the safe one: the Unicode Normalization
+    Stability Policy guarantees the normalized form of an already-assigned
+    string never changes in a later version, which is exactly the guarantee
+    ``\w`` and ``casefold`` do not give.
+    """
+    normalized = unicodedata.normalize("NFC", text)
+    return _TOKEN.findall(normalized.translate(_ASCII_FOLD))
 
 
 class HashEmbeddingProvider:
@@ -149,12 +167,14 @@ class CosineReranker:
     """
 
     def __init__(self, *, embedder: EmbeddingProvider) -> None:
-        # A reranker is only as offline and as reproducible as the embedder
-        # inside it. Without this the registry would check the reranker's own
-        # descriptor, see requires_network=False, and admit a wrapped cloud
-        # client (AGENTS.md §9: same root cause, other point on the path).
-        require_offline_provider(embedder.descriptor)
-        if not embedder.descriptor.normalized:
+        # Taking an embedder is an admission point, so it runs the same
+        # admission check the registry does: real interface, embedding kind,
+        # inside the Phase 3 offline fence. Checking only the flags would
+        # still accept an object with no embed_query, or a reranker in an
+        # embedder's place (AGENTS.md §9: same root cause, other point on
+        # the path).
+        descriptor = require_provider(embedder, ProviderKind.EMBEDDING)
+        if not descriptor.normalized:
             # Unit vectors are what makes the dot product a cosine. Rather
             # than dividing by a norm that might be zero, refuse the
             # composition up front.

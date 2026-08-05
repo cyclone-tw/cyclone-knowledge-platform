@@ -264,6 +264,14 @@ def require_text(value: object) -> str:
         raise EmbeddingRefusal(EmbeddingErrorCode.TEXT_INVALID)
     if not value.strip():
         raise EmbeddingRefusal(EmbeddingErrorCode.TEXT_EMPTY)
+    try:
+        # A lone surrogate is a legal ``str`` that cannot be encoded. Every
+        # provider hashes bytes eventually, so without this the first
+        # ``encode`` raises UnicodeEncodeError -- an unstable exception type
+        # escaping instead of a coded refusal.
+        value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise EmbeddingRefusal(EmbeddingErrorCode.TEXT_INVALID) from error
     return value
 
 

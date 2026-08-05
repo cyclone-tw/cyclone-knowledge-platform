@@ -26,6 +26,8 @@ from ckp.embedding.provider import EmbeddingProvider, RerankerProvider
 from embedding_fixtures import (
     SAMPLE_TEXTS,
     DescriptorOnlyEmbedding,
+    DescriptorOnlyReranker,
+    NonCallableEmbedding,
     candidates_from,
     descriptor_with,
 )
@@ -141,9 +143,13 @@ def test_the_tokenizer_reads_no_unicode_database() -> None:
     """
     for unicode_class in (r"\w", r"\W", r"\s", r"\S", r"\d", r"\D", r"\b"):
         assert unicode_class not in _TOKEN.pattern
-    source = inspect.getsource(tokenize)
-    assert "casefold" not in source
-    assert ".lower(" not in source
+    # Read the compiled names, not the source: the docstring has to be free
+    # to say the word "casefold" while explaining why it is not used.
+    names = set(tokenize.__code__.co_names)
+    assert "casefold" not in names
+    assert "lower" not in names
+    # NFC is the one table it does consult, and only for normalization.
+    assert names & {"unicodedata", "normalize"} == {"unicodedata", "normalize"}
 
 
 def test_case_folding_is_ascii_only_and_declared_as_such() -> None:
@@ -174,6 +180,39 @@ def test_empty_untokenizable_and_non_text_inputs_fail_closed() -> None:
         with pytest.raises(EmbeddingRefusal) as refusal:
             provider.embed_query(bad)  # type: ignore[arg-type]
         assert refusal.value.code is EmbeddingErrorCode.TEXT_INVALID
+
+
+def test_text_that_cannot_be_encoded_fails_closed_with_a_code() -> None:
+    """A lone surrogate is a legal str that no provider can hash.
+
+    Without the gate the first ``encode`` raises UnicodeEncodeError, so an
+    unstable exception type escapes where a coded refusal was promised.
+    """
+    provider = HashEmbeddingProvider(dimension=DIMENSION)
+    for unencodable in ("\ud800", "kettle\udfff", "\udc00\ud800"):
+        with pytest.raises(EmbeddingRefusal) as refusal:
+            provider.embed_query(unencodable)
+        assert refusal.value.code is EmbeddingErrorCode.TEXT_INVALID
+        with pytest.raises(EmbeddingRefusal):
+            provider.embed_documents([unencodable])
+
+
+def test_composed_and_decomposed_text_embed_identically() -> None:
+    """macOS hands over NFD, almost everything else NFC.
+
+    Without normalization the same note filed from two machines lands in
+    different buckets and stops matching its own query.
+    """
+    provider = HashEmbeddingProvider(dimension=DIMENSION)
+    for composed, decomposed in (
+        ("caf\u00e9 brew", "cafe\u0301 brew"),
+        ("\u9ad8\u9f61", "\u9ad8\u9f61"),
+        ("\u30ac\u30c8", "\u30ab\u3099\u30c8"),
+    ):
+        assert provider.embed_query(composed).values == (
+            provider.embed_query(decomposed).values
+        )
+    assert tokenize("cafe\u0301") == ["caf", "\u00e9"]
 
 
 def test_a_bare_string_is_not_a_batch_of_documents() -> None:
@@ -320,6 +359,21 @@ def test_a_cosine_reranker_refuses_an_offline_violating_embedder() -> None:
         with pytest.raises(EmbeddingRefusal) as refusal:
             CosineReranker(embedder=embedder)
         assert refusal.value.code is expected, label
+
+
+def test_a_cosine_reranker_refuses_an_embedder_that_is_not_one() -> None:
+    """Taking an embedder is an admission point, not just a flag check."""
+    not_an_embedder = DescriptorOnlyReranker(
+        descriptor_with(kind=ProviderKind.RERANKER, dimension=None)
+    )
+    with pytest.raises(EmbeddingRefusal) as refusal:
+        CosineReranker(embedder=not_an_embedder)
+    assert refusal.value.code is EmbeddingErrorCode.PROVIDER_KIND_MISMATCH
+
+    hollow = NonCallableEmbedding(descriptor_with())
+    with pytest.raises(EmbeddingRefusal) as refusal:
+        CosineReranker(embedder=hollow)
+    assert refusal.value.code is EmbeddingErrorCode.PROVIDER_KIND_MISMATCH
 
 
 def test_a_reranker_reports_the_flags_of_the_embedder_it_wraps() -> None:

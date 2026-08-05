@@ -20,6 +20,7 @@ from ckp.embedding.models import (
     EmbeddingBatch,
     EmbeddingVector,
     ProviderDescriptor,
+    ProviderKind,
     RerankCandidate,
     RerankResult,
 )
@@ -56,6 +57,33 @@ def require_callable_interface(provider: object, methods: tuple[str, ...]) -> No
     for method in methods:
         if not callable(getattr(provider, method, None)):
             raise EmbeddingRefusal(EmbeddingErrorCode.PROVIDER_KIND_MISMATCH)
+
+
+def require_provider(provider: object, kind: ProviderKind) -> ProviderDescriptor:
+    """The single admission check, wherever a provider is taken in.
+
+    The registry is not the only door: a reranker takes an embedder, and a
+    composed stack takes both. Each of those is an admission point, and one
+    that only looked at the offline flags would still accept an object with
+    no ``embed_query`` or a reranker descriptor in an embedder's place.
+    Returns the validated descriptor so callers do not re-fetch it.
+    """
+    if kind is ProviderKind.EMBEDDING:
+        expected: type = EmbeddingProvider
+        methods = EMBEDDING_METHODS
+    else:
+        expected = RerankerProvider
+        methods = RERANKER_METHODS
+    if not isinstance(provider, expected):
+        raise EmbeddingRefusal(EmbeddingErrorCode.PROVIDER_KIND_MISMATCH)
+    require_callable_interface(provider, methods)
+    descriptor = getattr(provider, "descriptor", None)
+    if not isinstance(descriptor, ProviderDescriptor):
+        raise EmbeddingRefusal(EmbeddingErrorCode.DESCRIPTOR_INVALID)
+    if descriptor.kind is not kind:
+        raise EmbeddingRefusal(EmbeddingErrorCode.PROVIDER_KIND_MISMATCH)
+    require_offline_provider(descriptor)
+    return descriptor
 
 
 @runtime_checkable
@@ -115,4 +143,5 @@ __all__ = [
     "RerankerProvider",
     "require_callable_interface",
     "require_offline_provider",
+    "require_provider",
 ]

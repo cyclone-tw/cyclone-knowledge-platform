@@ -37,6 +37,10 @@ ALLOWED_IMPORT_ROOTS = frozenset(
         "pydantic",
         "re",
         "typing",
+        # Normalization only. Unicode's stability policy pins the normalized
+        # form of an already-assigned string across versions, which is why
+        # this one table is safe to consult and ``\\w``/``casefold`` are not.
+        "unicodedata",
     }
 )
 

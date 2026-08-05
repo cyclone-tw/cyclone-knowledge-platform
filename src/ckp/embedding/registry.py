@@ -9,24 +9,14 @@ every rejection has a stable code.
 from __future__ import annotations
 
 from ckp.embedding.errors import EmbeddingErrorCode, EmbeddingRefusal
-from ckp.embedding.models import ProviderDescriptor, ProviderKind
+from ckp.embedding.models import ProviderKind
 from ckp.embedding.provider import (
-    EMBEDDING_METHODS,
-    RERANKER_METHODS,
     EmbeddingProvider,
     RerankerProvider,
-    require_callable_interface,
-    require_offline_provider,
+    require_provider,
 )
 
 _NAME_MAX = 64
-
-
-def _require_registrable(descriptor: ProviderDescriptor, kind: ProviderKind) -> None:
-    """The registration boundary: right kind, and inside the Phase 3 fence."""
-    if descriptor.kind is not kind:
-        raise EmbeddingRefusal(EmbeddingErrorCode.PROVIDER_KIND_MISMATCH)
-    require_offline_provider(descriptor)
 
 
 class ProviderRegistry:
@@ -63,19 +53,7 @@ class ProviderRegistry:
     ) -> None:
         if not isinstance(name, str) or not name or len(name) > _NAME_MAX:
             raise EmbeddingRefusal(EmbeddingErrorCode.PROVIDER_UNKNOWN)
-        if kind is ProviderKind.EMBEDDING:
-            expected: type = EmbeddingProvider
-            methods = EMBEDDING_METHODS
-        else:
-            expected = RerankerProvider
-            methods = RERANKER_METHODS
-        if not isinstance(provider, expected):
-            raise EmbeddingRefusal(EmbeddingErrorCode.PROVIDER_KIND_MISMATCH)
-        require_callable_interface(provider, methods)
-        descriptor = getattr(provider, "descriptor", None)
-        if not isinstance(descriptor, ProviderDescriptor):
-            raise EmbeddingRefusal(EmbeddingErrorCode.DESCRIPTOR_INVALID)
-        _require_registrable(descriptor, kind)
+        require_provider(provider, kind)
         if name in slot:
             # Silent override would make the winner depend on import order.
             raise EmbeddingRefusal(EmbeddingErrorCode.PROVIDER_DUPLICATE)
