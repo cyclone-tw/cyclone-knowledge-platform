@@ -10,6 +10,7 @@ import pytest
 
 from ckp.index import (
     InMemoryVectorIndex,
+    RebuildPlan,
     compute_payload_digest,
     plan_rebuild,
     require_index_provider,
@@ -126,6 +127,46 @@ def test_full_rebuild_replaces_the_previous_corpus() -> None:
         _query("espresso grind dial grams"), top_k=100, filter_privacy=PUBLIC
     )
     assert [hit.relative_path for hit in result.hits] == ["only.md"]
+
+
+def test_an_unsealed_plan_is_refused() -> None:
+    # Hand-built around the privacy gate: structurally the same shape, but
+    # not minted by plan_rebuild/read_plan_snapshot -- providers refuse it.
+    real = _plan()
+    forged = RebuildPlan(
+        points=real.points,
+        dimension=real.dimension,
+        composed_revision=real.composed_revision,
+        bundle_index_revision=real.bundle_index_revision,
+        embedding_revision=real.embedding_revision,
+        indexed_count=real.indexed_count,
+        payload_digest=real.payload_digest,
+        seal=object(),
+    )
+    with pytest.raises(IndexRefusal) as caught:
+        InMemoryVectorIndex().rebuild(forged)
+    assert caught.value.code is IndexErrorCode.PLAN_INVALID
+
+
+def test_snapshot_metadata_tampering_fails_closed(tmp_path: Path) -> None:
+    index = InMemoryVectorIndex()
+    index.rebuild(_plan())
+    snapshot_path = index.snapshot(tmp_path)
+    payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    for field, value in (
+        ("composed_revision", f"sha256:{'e' * 64}"),
+        ("embedding_revision", f"sha256:{'e' * 64}"),
+        ("bundle_index_revision", f"sha256:{'e' * 64}"),
+        ("dimension", 16),
+        ("indexed_count", 1),
+    ):
+        edited = dict(payload)
+        edited[field] = value
+        target = tmp_path / f"tampered-{field}.json"
+        target.write_text(json.dumps(edited, sort_keys=True), encoding="utf-8")
+        with pytest.raises(IndexRefusal) as caught:
+            InMemoryVectorIndex().restore(target)
+        assert caught.value.code is IndexErrorCode.SNAPSHOT_INVALID, field
 
 
 def test_rebuild_verifies_the_payload_digest() -> None:

@@ -17,6 +17,7 @@ import json
 import math
 import struct
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -64,6 +65,20 @@ class IndexedPoint:
     vector: tuple[float, ...]
 
 
+class _PlanSeal:
+    """Capability token minted only in this module (C2 ``Admitted`` pattern).
+
+    Not cryptography: deliberate imports can still forge one. What it stops
+    is every honest route to an ungated plan -- direct construction of a
+    ``RebuildPlan`` around the privacy gate now fails provider admission.
+    """
+
+    __slots__ = ()
+
+
+_PLAN_SEAL = _PlanSeal()
+
+
 @dataclass(frozen=True)
 class RebuildPlan:
     """Everything a provider needs to rebuild from an empty volume.
@@ -72,6 +87,11 @@ class RebuildPlan:
     same commit with the same stack must produce byte-identical digests, and
     a provider's post-rebuild verification recomputes it from what was
     actually stored.
+
+    Deliberately carries no count of refused members: a plan, a snapshot, or
+    a report must not disclose how much non-public material exists near the
+    corpus (R1 review). Tests infer exclusion from ``indexed_count`` against
+    the fixture they built.
     """
 
     points: tuple[IndexedPoint, ...]
@@ -79,10 +99,16 @@ class RebuildPlan:
     composed_revision: str
     bundle_index_revision: str
     embedding_revision: str
-    member_count: int
     indexed_count: int
-    excluded_count: int
     payload_digest: str
+    seal: object = dataclass_field(repr=False, compare=False, kw_only=True)
+
+
+def require_sealed_plan(plan: object) -> RebuildPlan:
+    """Provider admission: only plans minted by this module are buildable."""
+    if not isinstance(plan, RebuildPlan) or plan.seal is not _PLAN_SEAL:
+        raise IndexRefusal(IndexErrorCode.PLAN_INVALID)
+    return plan
 
 
 class SearchHit(BaseModel):
@@ -91,7 +117,6 @@ class SearchHit(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     relative_path: str = Field(min_length=1)
-    content_sha256: str = Field(min_length=64, max_length=64)
     score: float
     rank: int = Field(ge=0)
 
@@ -135,8 +160,6 @@ class RebuildReport:
     provider_id: str
     composed_revision: str
     point_count: int
-    indexed_count: int
-    excluded_count: int
     payload_digest: str
 
 
@@ -244,19 +267,16 @@ def plan_rebuild(
 
     ordered = sorted(members, key=lambda item: (item.digest_key, item.relative_path))
     admitted: list[tuple[BundleMember, str]] = []
-    excluded = 0
     for member in ordered:
         verdict = gate.admit_member(member)
         admitted_public = (
             isinstance(verdict, Admitted) and verdict.privacy is PrivacyClass.PUBLIC
         )
         if not admitted_public:
-            excluded += 1
             continue
         try:
             text = _note_text(member.content.decode("utf-8"))
         except UnicodeDecodeError:
-            excluded += 1
             continue
         admitted.append((member, text))
 
@@ -268,7 +288,6 @@ def plan_rebuild(
         try:
             vector = stack.embedding.embed_query(text).values
         except EmbeddingRefusal:
-            excluded += 1
             continue
         points.append(
             IndexedPoint(
@@ -294,14 +313,13 @@ def plan_rebuild(
         ),
         bundle_index_revision=bundle_revision,
         embedding_revision=stack.embedding_revision,
-        member_count=len(members),
         indexed_count=len(frozen_points),
-        excluded_count=excluded,
         payload_digest=compute_payload_digest(frozen_points),
+        seal=_PLAN_SEAL,
     )
 
 
-SNAPSHOT_SCHEMA = "ckp-index-snapshot/1"
+SNAPSHOT_SCHEMA = "ckp-index-snapshot/2"
 
 
 def write_plan_snapshot(
@@ -325,9 +343,7 @@ def write_plan_snapshot(
         "composed_revision": plan.composed_revision,
         "bundle_index_revision": plan.bundle_index_revision,
         "embedding_revision": plan.embedding_revision,
-        "member_count": plan.member_count,
         "indexed_count": plan.indexed_count,
-        "excluded_count": plan.excluded_count,
         "payload_digest": plan.payload_digest,
         "points": [
             {
@@ -371,10 +387,9 @@ def read_plan_snapshot(snapshot_path: Path) -> RebuildPlan:
             composed_revision=payload["composed_revision"],
             bundle_index_revision=payload["bundle_index_revision"],
             embedding_revision=payload["embedding_revision"],
-            member_count=int(payload["member_count"]),
             indexed_count=int(payload["indexed_count"]),
-            excluded_count=int(payload["excluded_count"]),
             payload_digest=payload["payload_digest"],
+            seal=_PLAN_SEAL,
         )
     except (KeyError, TypeError, ValueError) as error:
         raise IndexRefusal(IndexErrorCode.SNAPSHOT_INVALID) from error
@@ -384,6 +399,22 @@ def read_plan_snapshot(snapshot_path: Path) -> RebuildPlan:
         raise IndexRefusal(IndexErrorCode.SNAPSHOT_INVALID)
     if len(points) != plan.indexed_count:
         raise IndexRefusal(IndexErrorCode.SNAPSHOT_INVALID)
+    # Metadata is covered too (R1 review): the composed revision must be
+    # recomputable from the stored inputs, every stored point must carry its
+    # derived id and a vector of the declared dimension. A snapshot whose
+    # metadata was edited cannot pass any of these.
+    recomputed = compute_composed_index_revision(
+        bundle_index_revision=plan.bundle_index_revision,
+        embedding_revision=plan.embedding_revision,
+        index_schema_version=INDEX_SCHEMA_VERSION,
+    )
+    if plan.composed_revision != recomputed:
+        raise IndexRefusal(IndexErrorCode.SNAPSHOT_INVALID)
+    for point in points:
+        if point.point_id != compute_point_id(point.digest_key):
+            raise IndexRefusal(IndexErrorCode.SNAPSHOT_INVALID)
+        if len(point.vector) != plan.dimension:
+            raise IndexRefusal(IndexErrorCode.SNAPSHOT_INVALID)
     return plan
 
 
@@ -400,6 +431,7 @@ __all__ = [
     "compute_point_id",
     "plan_rebuild",
     "read_plan_snapshot",
+    "require_sealed_plan",
     "require_public_filter",
     "require_query_vector",
     "require_top_k",

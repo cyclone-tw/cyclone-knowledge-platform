@@ -125,7 +125,6 @@ def test_search_parity_with_the_reference_index() -> None:
                 hit.relative_path for hit in memory_hits.hits
             ]
             for left, right in zip(qdrant_hits.hits, memory_hits.hits, strict=True):
-                assert left.content_sha256 == right.content_sha256
                 assert left.score == pytest.approx(right.score, abs=1e-5)
     finally:
         qdrant.wipe()

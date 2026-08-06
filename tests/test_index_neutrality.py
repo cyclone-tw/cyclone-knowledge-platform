@@ -27,6 +27,7 @@ from ckp.index import (
     require_index_provider,
     require_public_filter,
     require_query_vector,
+    require_sealed_plan,
     require_top_k,
     write_plan_snapshot,
 )
@@ -58,22 +59,16 @@ class ThirdPartyListIndex:
         return self._descriptor
 
     def rebuild(self, plan: RebuildPlan) -> RebuildReport:
-        if not isinstance(plan, RebuildPlan):
-            raise IndexRefusal(IndexErrorCode.PLAN_INVALID)
+        require_sealed_plan(plan)
         self.wipe()
         if compute_payload_digest(plan.points) != plan.payload_digest:
             raise IndexRefusal(IndexErrorCode.PLAN_INVALID)
-        self._rows = [
-            (point.relative_path, point.content_sha256, point.vector)
-            for point in plan.points
-        ]
+        self._rows = [(point.relative_path, point.vector) for point in plan.points]
         self._plan = plan
         return RebuildReport(
             provider_id=self._descriptor.provider_id,
             composed_revision=plan.composed_revision,
             point_count=len(self._rows),
-            indexed_count=plan.indexed_count,
-            excluded_count=plan.excluded_count,
             payload_digest=plan.payload_digest,
         )
 
@@ -88,21 +83,15 @@ class ThirdPartyListIndex:
                 (
                     -sum(a * b for a, b in zip(vector, row_vector, strict=True)),
                     path,
-                    sha,
                 )
-                for path, sha, row_vector in self._rows
+                for path, row_vector in self._rows
             ),
         )
         return SearchResult(
             composed_revision=self._plan.composed_revision,
             hits=tuple(
-                SearchHit(
-                    relative_path=path,
-                    content_sha256=sha,
-                    score=-negated,
-                    rank=rank,
-                )
-                for rank, (negated, path, sha) in enumerate(scored[:limit])
+                SearchHit(relative_path=path, score=-negated, rank=rank)
+                for rank, (negated, path) in enumerate(scored[:limit])
             ),
         )
 

@@ -26,7 +26,6 @@ cleanly without it.
 
 from __future__ import annotations
 
-import contextlib
 import math
 import struct
 import uuid
@@ -43,6 +42,7 @@ from ckp.index.models import (
     read_plan_snapshot,
     require_public_filter,
     require_query_vector,
+    require_sealed_plan,
     require_top_k,
     write_plan_snapshot,
 )
@@ -104,8 +104,7 @@ class QdrantVectorIndex:
         return self._descriptor
 
     def rebuild(self, plan: RebuildPlan) -> RebuildReport:
-        if not isinstance(plan, RebuildPlan):
-            raise IndexRefusal(IndexErrorCode.PLAN_INVALID)
+        require_sealed_plan(plan)
         from qdrant_client import models as qmodels
 
         self.wipe()
@@ -169,29 +168,18 @@ class QdrantVectorIndex:
         for hit in response.points:
             payload = hit.payload or {}
             relative_path = payload.get("relative_path")
-            content_sha256 = payload.get("content_sha256")
-            identity_ok = isinstance(relative_path, str) and isinstance(
-                content_sha256, str
-            )
-            if not identity_ok:
+            if not isinstance(relative_path, str):
                 raise IndexRefusal(IndexErrorCode.UNAVAILABLE)
             score = float(hit.score)
             if not math.isfinite(score):
                 raise IndexRefusal(IndexErrorCode.UNAVAILABLE)
-            scored.append((relative_path, content_sha256, score))
-        scored.sort(key=lambda item: (-item[2], item[0]))
+            scored.append((relative_path, score))
+        scored.sort(key=lambda item: (-item[1], item[0]))
         return SearchResult(
             composed_revision=plan.composed_revision,
             hits=tuple(
-                SearchHit(
-                    relative_path=relative_path,
-                    content_sha256=content_sha256,
-                    score=score,
-                    rank=rank,
-                )
-                for rank, (relative_path, content_sha256, score) in enumerate(
-                    scored[:limit]
-                )
+                SearchHit(relative_path=relative_path, score=score, rank=rank)
+                for rank, (relative_path, score) in enumerate(scored[:limit])
             ),
         )
 
@@ -206,10 +194,18 @@ class QdrantVectorIndex:
         return self.rebuild(plan)
 
     def wipe(self) -> None:
-        # Absent collection is the desired post-state; anything else will
-        # resurface on the next operation with a stable code.
-        with contextlib.suppress(Exception):
+        # Fail closed rather than pretend (R1 review): if the delete failed
+        # AND the collection still exists (or existence cannot be checked),
+        # the wipe did not happen -- surface it instead of reporting success.
+        try:
             self._client.delete_collection(collection_name=self._collection)
+        except Exception as delete_error:
+            try:
+                still_there = self._client.collection_exists(self._collection)
+            except Exception as probe_error:
+                raise IndexRefusal(IndexErrorCode.UNAVAILABLE) from probe_error
+            if still_there:
+                raise IndexRefusal(IndexErrorCode.UNAVAILABLE) from delete_error
         self._plan = None
 
     def _require_built(self) -> RebuildPlan:
@@ -261,8 +257,6 @@ class QdrantVectorIndex:
             provider_id=self._descriptor.provider_id,
             composed_revision=plan.composed_revision,
             point_count=plan.indexed_count,
-            indexed_count=plan.indexed_count,
-            excluded_count=plan.excluded_count,
             payload_digest=plan.payload_digest,
         )
 

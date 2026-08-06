@@ -30,6 +30,7 @@ from ckp.index.models import (
     read_plan_snapshot,
     require_public_filter,
     require_query_vector,
+    require_sealed_plan,
     require_top_k,
     write_plan_snapshot,
 )
@@ -73,6 +74,7 @@ __all__ = [
     "read_plan_snapshot",
     "require_index_provider",
     "require_public_filter",
+    "require_sealed_plan",
     "require_query_vector",
     "require_top_k",
     "write_plan_snapshot",

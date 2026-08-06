@@ -23,7 +23,6 @@ import time
 from benchmarks.questions import (
     CORPUS_BODIES,
     CORPUS_VERSION,
-    NON_PUBLIC_PATHS,
     QUESTION_SET_VERSION,
     QUESTIONS,
 )
@@ -41,7 +40,7 @@ from ckp.index.provider import VectorIndexProvider, require_index_provider
 from ckp.privacy import PrivacyClass
 from ckp.privacy.gate import PrivacyGate
 
-REPORT_SCHEMA = "ckp-shadow-report/1"
+REPORT_SCHEMA = "ckp-shadow-report/2"
 
 _PUBLIC_ONLY = frozenset({PrivacyClass.PUBLIC})
 
@@ -79,6 +78,11 @@ def run_shadow_benchmark(
     )
     catalog = CatalogBuilder(gate).build(snapshot)
 
+    #: The only paths any engine may surface: what the gated plan indexed.
+    #: Judging leaks against this set (not a fixture list) also catches a
+    #: rogue provider inventing paths nobody has ever seen (R1 review).
+    public_paths = frozenset(point.relative_path for point in plan.points)
+
     questions = []
     lexical_hits = 0
     vector_hits = 0
@@ -86,6 +90,7 @@ def run_shadow_benchmark(
     lexical_tokens_total = 0
     vector_tokens_total = 0
     privacy_violations = 0
+    citation_correct_count = 0
     lexical_no_answer_correct = True
     lexical_elapsed = 0.0
     vector_elapsed = 0.0
@@ -96,7 +101,7 @@ def run_shadow_benchmark(
             catalog, QueryRequest(query=question.query, limit=top_k)
         )
         lexical_elapsed += time.perf_counter() - started
-        lexical_paths = tuple(result.citation.path for result in lexical.results)
+        raw_lexical_paths = tuple(result.citation.path for result in lexical.results)
 
         started = time.perf_counter()
         query_vector = stack.embedding.embed_query(question.query).values
@@ -104,10 +109,31 @@ def run_shadow_benchmark(
             query_vector, top_k=top_k, filter_privacy=_PUBLIC_ONLY
         )
         vector_elapsed += time.perf_counter() - started
-        vector_paths = tuple(hit.relative_path for hit in vector.hits)
+        raw_vector_paths = tuple(hit.relative_path for hit in vector.hits)
 
-        for paths in (lexical_paths, vector_paths):
-            privacy_violations += sum(1 for path in paths if path in NON_PUBLIC_PATHS)
+        # Leaked paths are counted and then *redacted*: a violating path must
+        # never travel onward inside the report it violated (R1 review).
+        lexical_paths = tuple(
+            path for path in raw_lexical_paths if path in public_paths
+        )
+        vector_paths = tuple(path for path in raw_vector_paths if path in public_paths)
+        privacy_violations += (len(raw_lexical_paths) - len(lexical_paths)) + (
+            len(raw_vector_paths) - len(vector_paths)
+        )
+
+        # Citation correctness (§5.3): every lexical citation must bind the
+        # path it ranks and the exact snapshot revision served; the vector
+        # result must be bound to the rebuilt composed revision.
+        citation_correct = (
+            all(
+                result.citation.concept_id == result.concept_id
+                and result.citation.index_revision == catalog.index_revision
+                for result in lexical.results
+            )
+            and vector.composed_revision == plan.composed_revision
+        )
+        if citation_correct:
+            citation_correct_count += 1
 
         lexical_hit = _hit(question.expected_paths, lexical_paths)
         vector_hit = _hit(question.expected_paths, vector_paths)
@@ -129,6 +155,7 @@ def run_shadow_benchmark(
                 "category": question.category,
                 "query": question.query,
                 "expected_paths": list(question.expected_paths),
+                "citation_correct": citation_correct,
                 "lexical": {
                     "paths": list(lexical_paths),
                     "hit": lexical_hit,
@@ -153,16 +180,18 @@ def run_shadow_benchmark(
         "composed_revision": plan.composed_revision,
         "bundle_index_revision": plan.bundle_index_revision,
         "embedding_revision": plan.embedding_revision,
-        "semantic": False,
+        # Read from the descriptor, never hardcoded: a semantic provider
+        # must not be reported as a hash baseline, or vice versa (R1 review).
+        "semantic": stack.embedding.descriptor.semantic,
         "semantic_note": (
-            "vector numbers come from the deterministic C4 hash embedding "
-            "(semantic=false): a reproducible baseline, not semantic quality"
+            "vector numbers come from a provider declaring semantic=false: "
+            "a reproducible baseline, not semantic quality"
+            if not stack.embedding.descriptor.semantic
+            else "vector numbers come from a provider declaring semantic=true"
         ),
         "top_k": top_k,
         "rebuild": {
             "point_count": rebuild_report.point_count,
-            "indexed_count": rebuild_report.indexed_count,
-            "excluded_count": rebuild_report.excluded_count,
         },
         "questions": questions,
         "summary": {
@@ -172,6 +201,7 @@ def run_shadow_benchmark(
             "lexical_token_cost_total": lexical_tokens_total,
             "vector_token_cost_total": vector_tokens_total,
             "lexical_no_answer_correct": lexical_no_answer_correct,
+            "citation_correct_questions": citation_correct_count,
             "privacy_violations": privacy_violations,
         },
         "latency_ms": {

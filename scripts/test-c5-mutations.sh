@@ -222,11 +222,13 @@ echo "==> shadow benchmark honesty"
 new_case
 replace_once \
   "benchmarks/shadow.py" \
-  '            privacy_violations += sum(1 for path in paths if path in NON_PUBLIC_PATHS)' \
-  '            privacy_violations += 0  # mutant stops counting leaks'
+  '        privacy_violations += (len(raw_lexical_paths) - len(lexical_paths)) + (
+            len(raw_vector_paths) - len(vector_paths)
+        )' \
+  '        privacy_violations += 0  # mutant stops counting leaks'
 expect_red \
   "M9 privacy violation counter silenced" \
-  tests/test_shadow_benchmark.py::test_privacy_violations_are_counted_not_hidden
+  tests/test_shadow_benchmark.py::test_privacy_violations_are_counted_and_redacted
 
 new_case
 replace_once \
@@ -281,5 +283,26 @@ replace_once \
 expect_red \
   "M14 top_k truncation ignored" \
   tests/test_index_memory.py::test_search_orders_truncates_and_guards
+
+echo "==> plan seal and snapshot metadata"
+new_case
+replace_once \
+  "src/ckp/index/models.py" \
+  '    if not isinstance(plan, RebuildPlan) or plan.seal is not _PLAN_SEAL:' \
+  '    if False:  # mutant accepts hand-built plans'
+expect_red \
+  "M15 plan seal admission removed" \
+  tests/test_index_memory.py::test_an_unsealed_plan_is_refused
+
+new_case
+replace_once \
+  "src/ckp/index/models.py" \
+  '    if plan.composed_revision != recomputed:
+        raise IndexRefusal(IndexErrorCode.SNAPSHOT_INVALID)' \
+  '    if False:  # mutant trusts snapshot metadata
+        raise IndexRefusal(IndexErrorCode.SNAPSHOT_INVALID)'
+expect_red \
+  "M16 snapshot metadata verification removed" \
+  tests/test_index_memory.py::test_snapshot_metadata_tampering_fails_closed
 
 echo "all C5 mutations red (baseline green)"

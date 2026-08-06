@@ -110,54 +110,47 @@ def test_search_hit_and_result_enforce_the_frozen_total_order() -> None:
     ok = SearchResult(
         composed_revision=f"sha256:{'a' * 64}",
         hits=(
-            SearchHit(relative_path="a.md", content_sha256=SHA, score=0.9, rank=0),
-            SearchHit(relative_path="b.md", content_sha256=SHA, score=0.9, rank=1),
-            SearchHit(relative_path="c.md", content_sha256=SHA, score=0.1, rank=2),
+            SearchHit(relative_path="a.md", score=0.9, rank=0),
+            SearchHit(relative_path="b.md", score=0.9, rank=1),
+            SearchHit(relative_path="c.md", score=0.1, rank=2),
         ),
     )
     assert len(ok.hits) == 3
     with pytest.raises(ValidationError):
-        SearchHit(relative_path="a.md", content_sha256=SHA, score=float("nan"), rank=0)
+        SearchHit(relative_path="a.md", score=float("nan"), rank=0)
     with pytest.raises(ValidationError):
         SearchResult(
             composed_revision=f"sha256:{'a' * 64}",
             hits=(
-                SearchHit(relative_path="a.md", content_sha256=SHA, score=0.1, rank=0),
-                SearchHit(relative_path="b.md", content_sha256=SHA, score=0.9, rank=1),
+                SearchHit(relative_path="a.md", score=0.1, rank=0),
+                SearchHit(relative_path="b.md", score=0.9, rank=1),
             ),
         )
     with pytest.raises(ValidationError):
         SearchResult(
             composed_revision=f"sha256:{'a' * 64}",
             hits=(
-                SearchHit(relative_path="b.md", content_sha256=SHA, score=0.9, rank=0),
-                SearchHit(relative_path="a.md", content_sha256=SHA, score=0.9, rank=1),
+                SearchHit(relative_path="b.md", score=0.9, rank=0),
+                SearchHit(relative_path="a.md", score=0.9, rank=1),
             ),
         )
     with pytest.raises(ValidationError):
         SearchResult(
             composed_revision=f"sha256:{'a' * 64}",
             hits=(
-                SearchHit(relative_path="a.md", content_sha256=SHA, score=0.9, rank=0),
-                SearchHit(relative_path="a.md", content_sha256=SHA, score=0.5, rank=1),
+                SearchHit(relative_path="a.md", score=0.9, rank=0),
+                SearchHit(relative_path="a.md", score=0.5, rank=1),
             ),
         )
     with pytest.raises(ValidationError):
         SearchResult(
             composed_revision=f"sha256:{'a' * 64}",
-            hits=(
-                SearchHit(relative_path="a.md", content_sha256=SHA, score=0.9, rank=1),
-            ),
+            hits=(SearchHit(relative_path="a.md", score=0.9, rank=1),),
         )
 
 
 def test_hit_models_never_carry_note_bodies() -> None:
-    assert set(SearchHit.model_fields) == {
-        "relative_path",
-        "content_sha256",
-        "score",
-        "rank",
-    }
+    assert set(SearchHit.model_fields) == {"relative_path", "score", "rank"}
     assert SearchHit.model_config.get("extra") == "forbid"
     assert set(SearchResult.model_fields) == {"composed_revision", "hits"}
 
@@ -199,10 +192,12 @@ def test_plan_rebuild_orders_gates_and_counts() -> None:
     gate = public_gate()
     plan = plan_rebuild(members=members, stack=stack, gate=gate)
 
-    assert plan.member_count == len(members)
     assert plan.indexed_count == len(plan.points)
-    assert plan.excluded_count == 3  # internal + sensitive + student-private
-    assert plan.indexed_count + plan.excluded_count == plan.member_count
+    # 11 fixture members, 3 non-public: exactly the 8 public notes made it,
+    # and the plan deliberately records nothing about what was refused.
+    assert plan.indexed_count == len(members) - 3
+    assert not hasattr(plan, "excluded_count")
+    assert not hasattr(plan, "member_count")
     keys = [point.digest_key for point in plan.points]
     assert keys == sorted(keys)
     assert all(len(point.vector) == plan.dimension for point in plan.points)
@@ -234,5 +229,4 @@ def test_plan_rebuild_fails_closed_on_empty_and_excludes_bad_members() -> None:
         gate=gate,
     )
     assert plan.indexed_count == 1
-    assert plan.excluded_count == 3
     assert plan.points[0].relative_path == "ok.md"

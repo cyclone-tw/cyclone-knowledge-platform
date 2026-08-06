@@ -23,6 +23,7 @@ from ckp.index.models import (
     read_plan_snapshot,
     require_public_filter,
     require_query_vector,
+    require_sealed_plan,
     require_top_k,
     write_plan_snapshot,
 )
@@ -50,8 +51,7 @@ class InMemoryVectorIndex:
         return self._descriptor
 
     def rebuild(self, plan: RebuildPlan) -> RebuildReport:
-        if not isinstance(plan, RebuildPlan):
-            raise IndexRefusal(IndexErrorCode.PLAN_INVALID)
+        require_sealed_plan(plan)
         self.wipe()
         stored = plan.points
         # Verify what was stored, not what was promised: recompute the digest
@@ -79,7 +79,6 @@ class InMemoryVectorIndex:
             hits=tuple(
                 SearchHit(
                     relative_path=point.relative_path,
-                    content_sha256=point.content_sha256,
                     score=score,
                     rank=rank,
                 )
@@ -112,8 +111,6 @@ class InMemoryVectorIndex:
             provider_id=self._descriptor.provider_id,
             composed_revision=plan.composed_revision,
             point_count=plan.indexed_count,
-            indexed_count=plan.indexed_count,
-            excluded_count=plan.excluded_count,
             payload_digest=plan.payload_digest,
         )
 

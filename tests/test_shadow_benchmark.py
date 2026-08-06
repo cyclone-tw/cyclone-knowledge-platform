@@ -51,7 +51,9 @@ def test_report_shape_and_honesty_fields() -> None:
     assert report["semantic"] is False
     assert "not semantic quality" in report["semantic_note"]
     assert report["index_provider"] == "memory-cosine"
-    assert report["rebuild"]["excluded_count"] == 3
+    # 11 fixture members, 3 non-public: the rebuild indexed exactly the 8
+    # public notes, and the report carries no count of what was refused.
+    assert report["rebuild"] == {"point_count": 8}
     assert len(report["questions"]) == len(QUESTIONS)
     assert report["summary"]["scored_questions"] == sum(
         1 for question in QUESTIONS if question.expected_paths
@@ -63,6 +65,7 @@ def test_both_engines_answer_the_frozen_corpus() -> None:
     assert summary["lexical_hit_rate"] == 1.0
     assert summary["vector_hit_rate"] == 1.0
     assert summary["lexical_no_answer_correct"] is True
+    assert summary["citation_correct_questions"] == len(QUESTIONS)
     assert summary["privacy_violations"] == 0
 
 
@@ -85,35 +88,38 @@ def test_no_sentinel_or_non_public_path_ever_reaches_the_report() -> None:
 
 
 class _LeakyIndex(InMemoryVectorIndex):
-    """A rogue provider that surfaces a non-public path in every search."""
+    """A rogue provider that surfaces a non-public path in every search.
+
+    ``never-indexed.md`` never existed anywhere -- it proves leak detection
+    is judged against the gated plan, not against a fixture list.
+    """
 
     def search(self, query_vector, *, top_k, filter_privacy) -> SearchResult:
         honest = super().search(
             query_vector, top_k=top_k, filter_privacy=filter_privacy
         )
         leaked = (
-            SearchHit(
-                relative_path="learner-record.md",
-                content_sha256="0" * 64,
-                score=2.0,
-                rank=0,
-            ),
+            SearchHit(relative_path="learner-record.md", score=3.0, rank=0),
+            SearchHit(relative_path="never-indexed.md", score=2.0, rank=1),
             *(
                 SearchHit(
                     relative_path=hit.relative_path,
-                    content_sha256=hit.content_sha256,
                     score=hit.score,
-                    rank=hit.rank + 1,
+                    rank=hit.rank + 2,
                 )
-                for hit in honest.hits[: top_k - 1]
+                for hit in honest.hits[: top_k - 2]
             ),
         )
         return SearchResult(composed_revision=honest.composed_revision, hits=leaked)
 
 
-def test_privacy_violations_are_counted_not_hidden() -> None:
+def test_privacy_violations_are_counted_and_redacted() -> None:
     report = _run(index_provider=_LeakyIndex())
-    assert report["summary"]["privacy_violations"] == len(QUESTIONS)
+    # Two leaked paths per question: one non-public fixture, one invented.
+    assert report["summary"]["privacy_violations"] == 2 * len(QUESTIONS)
+    rendered = json.dumps(report, sort_keys=True, ensure_ascii=False)
+    assert "learner-record.md" not in rendered
+    assert "never-indexed.md" not in rendered
 
 
 def test_all_required_composition_no_defaults() -> None:
