@@ -638,3 +638,111 @@ case "$offline_verdict" in
     exit 1
     ;;
 esac
+
+# C5 index and shadow-benchmark smoke, all in the disposable writer stage.
+# A dedicated Qdrant container joins the same docker network; the runtime
+# image stays free of the index extra (asserted below). The rebuild runs
+# twice against an emptied volume: same commit, same composed revision, is
+# the whole §5.5 reproducibility claim exercised on the deployment
+# interpreter rather than the dev venv.
+echo "==> C5 index rebuild, snapshot, and shadow benchmark smoke"
+QDRANT_NAME="${QDRANT_NAME:-ckp-smoke-qdrant}"
+SMOKE_NET="${SMOKE_NET:-ckp-smoke-net}"
+qdrant_cleanup() {
+  docker rm -f "$QDRANT_NAME" >/dev/null 2>&1 || true
+  docker network rm "$SMOKE_NET" >/dev/null 2>&1 || true
+}
+trap 'cleanup; qdrant_cleanup' EXIT
+qdrant_cleanup
+docker network create "$SMOKE_NET" >/dev/null
+docker run -d --name "$QDRANT_NAME" --network "$SMOKE_NET" \
+  qdrant/qdrant:v1.15.1 >/dev/null
+
+qdrant_ready=0
+for _ in $(seq 1 60); do
+  if docker run --rm --network "$SMOKE_NET" --entrypoint python "$WRITER_IMAGE" -c "
+import urllib.request
+urllib.request.urlopen('http://$QDRANT_NAME:6333/healthz', timeout=2)
+" >/dev/null 2>&1; then
+    qdrant_ready=1
+    break
+  fi
+  sleep 0.5
+done
+if [ "$qdrant_ready" -ne 1 ]; then
+  echo "smoke: qdrant service never became ready" >&2
+  docker logs "$QDRANT_NAME" >&2 || true
+  exit 1
+fi
+
+# The provider's loopback fence means the test client must reach the service
+# on 127.0.0.1: publish the qdrant port into the test container's localhost
+# via a socat-free trick -- run the tests in the qdrant container's network
+# namespace, where 127.0.0.1:6333 is the service itself.
+docker run --rm --network "container:$QDRANT_NAME" \
+  -e CKP_REQUIRE_QDRANT=1 \
+  --entrypoint python "$WRITER_IMAGE" \
+  -m pytest -q \
+  tests/test_index_models.py \
+  tests/test_index_memory.py \
+  tests/test_index_rebuild.py \
+  tests/test_index_neutrality.py \
+  tests/test_index_qdrant.py \
+  tests/test_shadow_benchmark.py \
+  tests/test_c5_contract.py
+echo "smoke: C5 index and shadow benchmark matrix looks right"
+
+# Empty-volume reproducibility straight against the service: rebuild, wipe,
+# rebuild again -- both runs must report the same composed revision, and it
+# must equal what the plan derives before any storage is involved.
+rebuild_verdict="$(docker run --rm -i --network "container:$QDRANT_NAME" \
+  --entrypoint python "$WRITER_IMAGE" - <<'PY'
+import sys
+
+sys.path.insert(0, "/app/tests")
+sys.path.insert(0, "/app")
+from index_fixtures import corpus_members, deterministic_stack, public_gate
+
+from ckp.index import QdrantVectorIndex, plan_rebuild
+
+plan = plan_rebuild(
+    members=corpus_members(), stack=deterministic_stack(), gate=public_gate()
+)
+index = QdrantVectorIndex(host="127.0.0.1", port=6333, collection="ckp-smoke-c5")
+first = index.rebuild(plan)
+index.wipe()
+second = index.rebuild(plan)
+index.wipe()
+failures = []
+if first.composed_revision != plan.composed_revision:
+    failures.append("first rebuild revision drifted from the plan")
+if second.composed_revision != first.composed_revision:
+    failures.append("empty-volume rebuild did not reproduce the revision")
+if second.payload_digest != plan.payload_digest:
+    failures.append("payload digest drifted across rebuilds")
+if failures:
+    for line in failures:
+        print(f"smoke: {line}", file=sys.stderr)
+    sys.exit(1)
+print("smoke: empty-volume Qdrant rebuild reproduces the composed revision")
+PY
+)"
+printf '%s\n' "$rebuild_verdict"
+case "$rebuild_verdict" in
+  *"reproduces the composed revision"*) ;;
+  *)
+    echo "smoke: empty-volume rebuild check produced no verdict" >&2
+    exit 1
+    ;;
+esac
+
+# The shipped runtime image must not gain the index extra.
+docker exec -i "$NAME" python - <<'PY'
+import importlib.util
+import sys
+
+if importlib.util.find_spec("qdrant_client"):
+    print("smoke: qdrant-client leaked into the runtime image", file=sys.stderr)
+    sys.exit(1)
+print("smoke: runtime image ships without the index extra")
+PY

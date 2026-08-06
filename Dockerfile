@@ -47,7 +47,8 @@ USER root
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends git
 COPY tests/ ./tests/
-RUN python -m pip install --no-cache-dir --disable-pip-version-check ".[dev]"
+COPY benchmarks/ ./benchmarks/
+RUN python -m pip install --no-cache-dir --disable-pip-version-check ".[dev,index]"
 USER ckp
 
 # Keep an ordinary `docker build` on the production runtime, not the C7 test

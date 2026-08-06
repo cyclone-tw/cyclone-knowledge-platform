@@ -19,6 +19,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The Qdrant client stays out of the base dependencies and out of the runtime
+# image on purpose (C5): the index is composed explicitly in tests, benchmarks,
+# and container smoke, never by the default app. Client pinned to the same
+# minor as the smoke/CI server image (qdrant/qdrant:v1.15.x).
+index = [
+  "qdrant-client>=1.14,<1.16",
+]
 dev = [
   "pytest>=8.0",
   "ruff>=0.6",

@@ -17,6 +17,14 @@ jobs:
   lint-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      # Local-only Qdrant for the C5 integration tests. CKP_REQUIRE_QDRANT
+      # turns the local "skip when unreachable" into a CI failure, so the
+      # integration path can never silently stop running here.
+      qdrant:
+        image: qdrant/qdrant:v1.15.1
+        ports:
+          - 6333:6333
     strategy:
       fail-fast: false
       matrix:
@@ -35,8 +43,8 @@ jobs:
         with:
           python-version: "${{ matrix.python-version }}"
 
-      - name: Install package with dev extras
-        run: python3 -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Install package with dev and index extras
+        run: python3 -m pip install --disable-pip-version-check -e ".[dev,index]"
 
       - name: Lint
         run: |
@@ -46,6 +54,7 @@ jobs:
       - name: Tests
         env:
           PYTHONDONTWRITEBYTECODE: "1"
+          CKP_REQUIRE_QDRANT: "1"
         run: python3 -m pytest
 
       - name: C6 mutation matrix
@@ -71,6 +80,12 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: bash scripts/test-c4-mutations.sh
+
+      - name: C5 index mutation matrix
+        if: matrix.python-version == '3.14'
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: bash scripts/test-c5-mutations.sh
 
   container:
     # Contract Phase 8 wants a cold rebuild on a different host to be routine.
