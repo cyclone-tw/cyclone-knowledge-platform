@@ -170,12 +170,8 @@ def test_a_replaced_plan_loses_its_seal() -> None:
 
     # Same count, same declared digest, different content: only recomputing
     # the payload digest from the actual points catches this one.
-    smuggled_point = dataclasses.replace(
-        real.points[0], relative_path="smuggled.md"
-    )
-    same_count = dataclasses.replace(
-        real, points=(smuggled_point, *real.points[1:])
-    )
+    smuggled_point = dataclasses.replace(real.points[0], relative_path="smuggled.md")
+    same_count = dataclasses.replace(real, points=(smuggled_point, *real.points[1:]))
     with pytest.raises(IndexRefusal) as caught:
         InMemoryVectorIndex().rebuild(same_count)
     assert caught.value.code is IndexErrorCode.PLAN_INVALID
