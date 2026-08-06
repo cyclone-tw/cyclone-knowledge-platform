@@ -13,8 +13,10 @@ the C4 rerank contract.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
+import secrets
 import struct
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -65,18 +67,33 @@ class IndexedPoint:
     vector: tuple[float, ...]
 
 
-class _PlanSeal:
-    """Capability token minted only in this module (C2 ``Admitted`` pattern).
-
-    Not cryptography: deliberate imports can still forge one. What it stops
-    is every honest route to an ungated plan -- direct construction of a
-    ``RebuildPlan`` around the privacy gate now fails provider admission.
-    """
-
-    __slots__ = ()
+#: Per-process seal key (R2 review): the seal must bind the plan *contents*,
+#: not just prove module provenance -- ``dataclasses.replace`` clones fields,
+#: so a provenance-only token would survive a swapped point set. The key is
+#: random per process and never persisted; snapshots re-mint on read.
+_SEAL_KEY = secrets.token_bytes(32)
 
 
-_PLAN_SEAL = _PlanSeal()
+def _expected_seal(
+    *,
+    dimension: int,
+    composed_revision: str,
+    bundle_index_revision: str,
+    embedding_revision: str,
+    indexed_count: int,
+    payload_digest: str,
+) -> bytes:
+    message = "\x1f".join(
+        (
+            str(dimension),
+            composed_revision,
+            bundle_index_revision,
+            embedding_revision,
+            str(indexed_count),
+            payload_digest,
+        )
+    ).encode("utf-8")
+    return hmac.new(_SEAL_KEY, message, hashlib.sha256).digest()
 
 
 @dataclass(frozen=True)
@@ -105,10 +122,63 @@ class RebuildPlan:
 
 
 def require_sealed_plan(plan: object) -> RebuildPlan:
-    """Provider admission: only plans minted by this module are buildable."""
-    if not isinstance(plan, RebuildPlan) or plan.seal is not _PLAN_SEAL:
+    """Provider admission: only unmodified plans minted here are buildable.
+
+    The seal covers every scalar field; the payload digest covers every
+    point. Recomputing both here means *no* provider needs its own copy of
+    the check, and ``dataclasses.replace`` on any field -- points included --
+    fails admission (R2 review). Not cryptography against a deliberate
+    in-process attacker (the key is importable), but every honest route to
+    an ungated or edited plan is closed.
+    """
+    if not isinstance(plan, RebuildPlan) or not isinstance(plan.seal, bytes):
         raise IndexRefusal(IndexErrorCode.PLAN_INVALID)
+    expected = _expected_seal(
+        dimension=plan.dimension,
+        composed_revision=plan.composed_revision,
+        bundle_index_revision=plan.bundle_index_revision,
+        embedding_revision=plan.embedding_revision,
+        indexed_count=plan.indexed_count,
+        payload_digest=plan.payload_digest,
+    )
+    if not hmac.compare_digest(plan.seal, expected):
+        raise IndexRefusal(IndexErrorCode.PLAN_INVALID)
+    if compute_payload_digest(plan.points) != plan.payload_digest:
+        raise IndexRefusal(IndexErrorCode.PLAN_INVALID)
+    if len(plan.points) != plan.indexed_count or plan.dimension < 1:
+        raise IndexRefusal(IndexErrorCode.PLAN_INVALID)
+    for point in plan.points:
+        if len(point.vector) != plan.dimension:
+            raise IndexRefusal(IndexErrorCode.PLAN_INVALID)
     return plan
+
+
+def _mint_plan(
+    *,
+    points: tuple[IndexedPoint, ...],
+    dimension: int,
+    composed_revision: str,
+    bundle_index_revision: str,
+    embedding_revision: str,
+    payload_digest: str,
+) -> RebuildPlan:
+    return RebuildPlan(
+        points=points,
+        dimension=dimension,
+        composed_revision=composed_revision,
+        bundle_index_revision=bundle_index_revision,
+        embedding_revision=embedding_revision,
+        indexed_count=len(points),
+        payload_digest=payload_digest,
+        seal=_expected_seal(
+            dimension=dimension,
+            composed_revision=composed_revision,
+            bundle_index_revision=bundle_index_revision,
+            embedding_revision=embedding_revision,
+            indexed_count=len(points),
+            payload_digest=payload_digest,
+        ),
+    )
 
 
 class SearchHit(BaseModel):
@@ -303,7 +373,7 @@ def plan_rebuild(
     if dimension is None:  # pragma: no cover - stack admission already forbids
         raise IndexRefusal(IndexErrorCode.PLAN_INVALID)
     frozen_points = tuple(points)
-    return RebuildPlan(
+    return _mint_plan(
         points=frozen_points,
         dimension=dimension,
         composed_revision=compute_composed_index_revision(
@@ -313,9 +383,7 @@ def plan_rebuild(
         ),
         bundle_index_revision=bundle_revision,
         embedding_revision=stack.embedding_revision,
-        indexed_count=len(frozen_points),
         payload_digest=compute_payload_digest(frozen_points),
-        seal=_PLAN_SEAL,
     )
 
 
@@ -370,6 +438,15 @@ def read_plan_snapshot(snapshot_path: Path) -> RebuildPlan:
         raise IndexRefusal(IndexErrorCode.SNAPSHOT_INVALID) from error
     if not isinstance(payload, dict) or payload.get("schema") != SNAPSHOT_SCHEMA:
         raise IndexRefusal(IndexErrorCode.SNAPSHOT_INVALID)
+
+    def _finite_component(value: object) -> float:
+        # ``float.fromhex`` happily parses nan/inf (R2 review); a snapshot
+        # carrying either violates the embedding invariants and must refuse.
+        component = float.fromhex(value)  # type: ignore[arg-type]
+        if not math.isfinite(component):
+            raise ValueError("non-finite vector component")
+        return component
+
     try:
         points = tuple(
             IndexedPoint(
@@ -377,27 +454,28 @@ def read_plan_snapshot(snapshot_path: Path) -> RebuildPlan:
                 digest_key=raw["digest_key"],
                 relative_path=raw["relative_path"],
                 content_sha256=raw["content_sha256"],
-                vector=tuple(float.fromhex(value) for value in raw["vector"]),
+                vector=tuple(_finite_component(value) for value in raw["vector"]),
             )
             for raw in payload["points"]
         )
-        plan = RebuildPlan(
+        dimension = int(payload["dimension"])
+        if dimension < 1:
+            raise ValueError("dimension must be at least 1")
+        if int(payload["indexed_count"]) != len(points):
+            raise ValueError("indexed_count does not match the point set")
+        plan = _mint_plan(
             points=points,
-            dimension=int(payload["dimension"]),
+            dimension=dimension,
             composed_revision=payload["composed_revision"],
             bundle_index_revision=payload["bundle_index_revision"],
             embedding_revision=payload["embedding_revision"],
-            indexed_count=int(payload["indexed_count"]),
             payload_digest=payload["payload_digest"],
-            seal=_PLAN_SEAL,
         )
     except (KeyError, TypeError, ValueError) as error:
         raise IndexRefusal(IndexErrorCode.SNAPSHOT_INVALID) from error
     # A snapshot edited on disk -- or truncated in transit -- must fail
     # closed here, not surface later as a quietly different index.
     if compute_payload_digest(points) != plan.payload_digest:
-        raise IndexRefusal(IndexErrorCode.SNAPSHOT_INVALID)
-    if len(points) != plan.indexed_count:
         raise IndexRefusal(IndexErrorCode.SNAPSHOT_INVALID)
     # Metadata is covered too (R1 review): the composed revision must be
     # recomputable from the stored inputs, every stored point must carry its

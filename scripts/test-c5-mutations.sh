@@ -288,11 +288,30 @@ echo "==> plan seal and snapshot metadata"
 new_case
 replace_once \
   "src/ckp/index/models.py" \
-  '    if not isinstance(plan, RebuildPlan) or plan.seal is not _PLAN_SEAL:' \
-  '    if False:  # mutant accepts hand-built plans'
+  '    if not hmac.compare_digest(plan.seal, expected):
+        raise IndexRefusal(IndexErrorCode.PLAN_INVALID)' \
+  '    if False:  # mutant accepts any seal
+        raise IndexRefusal(IndexErrorCode.PLAN_INVALID)'
 expect_red \
   "M15 plan seal admission removed" \
   tests/test_index_memory.py::test_an_unsealed_plan_is_refused
+
+new_case
+replace_once \
+  "src/ckp/index/models.py" \
+  '    if compute_payload_digest(plan.points) != plan.payload_digest:
+        raise IndexRefusal(IndexErrorCode.PLAN_INVALID)' \
+  '    if False:  # mutant trusts the declared digest
+        raise IndexRefusal(IndexErrorCode.PLAN_INVALID)'
+replace_once \
+  "src/ckp/index/memory.py" \
+  '        if compute_payload_digest(stored) != plan.payload_digest:
+            raise IndexRefusal(IndexErrorCode.PLAN_INVALID)' \
+  '        if False:  # mutant trusts the declared digest here too
+            raise IndexRefusal(IndexErrorCode.PLAN_INVALID)'
+expect_red \
+  "M17 payload digest recomputation removed at both layers" \
+  tests/test_index_memory.py::test_a_replaced_plan_loses_its_seal
 
 new_case
 replace_once \

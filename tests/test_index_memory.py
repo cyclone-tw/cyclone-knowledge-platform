@@ -141,10 +141,43 @@ def test_an_unsealed_plan_is_refused() -> None:
         embedding_revision=real.embedding_revision,
         indexed_count=real.indexed_count,
         payload_digest=real.payload_digest,
-        seal=object(),
+        seal=b"not-the-seal",
     )
     with pytest.raises(IndexRefusal) as caught:
         InMemoryVectorIndex().rebuild(forged)
+    assert caught.value.code is IndexErrorCode.PLAN_INVALID
+
+
+def test_a_replaced_plan_loses_its_seal() -> None:
+    # ``dataclasses.replace`` clones the seal, so the seal must bind the
+    # contents (R2 review): swapping the point set -- or the digest that
+    # vouches for it -- must fail provider admission.
+    real = _plan()
+    smuggled = dataclasses.replace(real, points=real.points[:1])
+    with pytest.raises(IndexRefusal) as caught:
+        InMemoryVectorIndex().rebuild(smuggled)
+    assert caught.value.code is IndexErrorCode.PLAN_INVALID
+
+    relabeled = dataclasses.replace(
+        real,
+        points=real.points[:1],
+        indexed_count=1,
+        payload_digest=f"sha256:{'d' * 64}",
+    )
+    with pytest.raises(IndexRefusal) as caught:
+        InMemoryVectorIndex().rebuild(relabeled)
+    assert caught.value.code is IndexErrorCode.PLAN_INVALID
+
+    # Same count, same declared digest, different content: only recomputing
+    # the payload digest from the actual points catches this one.
+    smuggled_point = dataclasses.replace(
+        real.points[0], relative_path="smuggled.md"
+    )
+    same_count = dataclasses.replace(
+        real, points=(smuggled_point, *real.points[1:])
+    )
+    with pytest.raises(IndexRefusal) as caught:
+        InMemoryVectorIndex().rebuild(same_count)
     assert caught.value.code is IndexErrorCode.PLAN_INVALID
 
 
@@ -158,15 +191,30 @@ def test_snapshot_metadata_tampering_fails_closed(tmp_path: Path) -> None:
         ("embedding_revision", f"sha256:{'e' * 64}"),
         ("bundle_index_revision", f"sha256:{'e' * 64}"),
         ("dimension", 16),
+        ("dimension", 0),
         ("indexed_count", 1),
     ):
         edited = dict(payload)
         edited[field] = value
-        target = tmp_path / f"tampered-{field}.json"
+        target = tmp_path / f"tampered-{field}-{value}.json"
         target.write_text(json.dumps(edited, sort_keys=True), encoding="utf-8")
         with pytest.raises(IndexRefusal) as caught:
             InMemoryVectorIndex().restore(target)
         assert caught.value.code is IndexErrorCode.SNAPSHOT_INVALID, field
+
+
+def test_snapshot_with_non_finite_vectors_fails_closed(tmp_path: Path) -> None:
+    index = InMemoryVectorIndex()
+    index.rebuild(_plan())
+    snapshot_path = index.snapshot(tmp_path)
+    payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    # float.fromhex would happily parse these (R2 review).
+    payload["points"][0]["vector"][0] = "nan"
+    target = tmp_path / "tampered-nan.json"
+    target.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    with pytest.raises(IndexRefusal) as caught:
+        InMemoryVectorIndex().restore(target)
+    assert caught.value.code is IndexErrorCode.SNAPSHOT_INVALID
 
 
 def test_rebuild_verifies_the_payload_digest() -> None:
