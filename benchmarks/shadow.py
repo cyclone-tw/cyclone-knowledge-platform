@@ -52,16 +52,17 @@ corpus. The report is honest about what it measures:
   -- the pooled hit rate on a mixed set answers "how did the whole set do",
   not "how did the platform do on real Cyclone-Wiki notes", and the two
   questions are not the same one. Token cost for a real-provenance
-  question is ``None`` (unmeasured) whenever a returned path's body is not
-  in ``benchmarks.questions.CORPUS_BODIES``, which (by RP1) never contains
-  a real note's body -- so today, every real question with any hit is
-  unmeasured. This module does not fabricate a real-body reader to fix
-  that (issue #24 is already building one for the QMD side, via the same
-  read-hash-discard pattern ``src/ckp/pilot/manifest.py`` uses;
-  duplicating it here would give two implementations that can drift).
-  Unifying the two sides -- so a real question's token cost is measured the
-  same way on both sides of the shadow comparison -- is follow-up work, not
-  this module's job today. See ``benchmarks.questions.KNOWN_COVERAGE_GAPS``
+  question is measured via ``benchmarks.token_cost.measure_token_cost``
+  (issue #40): a returned path's body first checks
+  ``benchmarks.questions.CORPUS_BODIES`` (synthetic, in-memory; by RP1 it
+  never contains a real note's body), then falls back to a transient read
+  under this call's ``wiki_root`` argument when one was given -- the same
+  read-hash-discard pattern ``src/ckp/pilot/manifest.py`` and the QMD side
+  (#24) both already relied on, now a single shared implementation instead
+  of two that could drift. ``wiki_root=None`` (the default, and always true
+  in CI, which has no wiki checkout) means every real-provenance hit stays
+  ``None`` -- unmeasured, never a silent 0 -- exactly the pre-#40 behavior.
+  See ``benchmarks.questions.KNOWN_COVERAGE_GAPS``
   and the module docstring there for the categories a real note does not
   exist to test at all;
 * issue #26 Round 3 (Codex): every *question-level* count and rate in
@@ -127,6 +128,7 @@ from __future__ import annotations
 
 import math
 import time
+from pathlib import Path
 
 from benchmarks.qmd.adapter import (
     QmdBaselineConfig,
@@ -135,7 +137,6 @@ from benchmarks.qmd.adapter import (
     run_qmd_query,
 )
 from benchmarks.questions import (
-    CORPUS_BODIES,
     CORPUS_VERSION,
     KNOWN_COVERAGE_GAPS,
     PUBLIC_DECLARED_PATHS,
@@ -143,6 +144,7 @@ from benchmarks.questions import (
     SUPERSEDED_PATHS,
     BenchmarkQuestion,
 )
+from benchmarks.token_cost import measure_token_cost
 from ckp.bundle import (
     BundleMember,
     BundleSnapshot,
@@ -216,23 +218,6 @@ DEFAULT_LATENCY_TRIALS = 5
 _PUBLIC_ONLY = frozenset({PrivacyClass.PUBLIC})
 
 
-def _token_cost(paths: tuple[str, ...]) -> int | None:
-    """Whitespace-proxy token count, or ``None`` when any path is unmeasured.
-
-    ``None`` (not ``0``) the moment a single path's body is not in
-    ``CORPUS_BODIES`` -- a path this module cannot see the body of is
-    unmeasured, never "measured at zero". An empty ``paths`` tuple (nothing
-    returned) is a real, honest zero and stays ``0``.
-    """
-    total = 0
-    for path in paths:
-        body = CORPUS_BODIES.get(path)
-        if body is None:
-            return None
-        total += len(body.split())
-    return total
-
-
 def _hit(expected: tuple[str, ...], returned: tuple[str, ...]) -> bool | None:
     if not expected:
         return None
@@ -263,7 +248,7 @@ def _provenance_summary(tally: dict[str, int]) -> dict:
 
     ``lexical_token_cost_total`` / ``vector_token_cost_total`` sum *measured*
     questions only (issue #26 coordinator review) -- a question whose token
-    cost was unmeasured (``_token_cost`` returned ``None``) contributes
+    cost was unmeasured (``measure_token_cost`` returned ``None``) contributes
     nothing to the total and is counted separately in
     ``lexical_token_cost_unmeasured_questions`` /
     ``vector_token_cost_unmeasured_questions`` instead, so the total's
@@ -352,6 +337,7 @@ def run_shadow_benchmark(
     index_admissible: frozenset[PrivacyClass] = _PUBLIC_ONLY,
     trials: int = DEFAULT_LATENCY_TRIALS,
     qmd_config: QmdBaselineConfig | None = None,
+    wiki_root: Path | None = None,
 ) -> dict:
     """Rebuild, query both engines, and assemble the deterministic report.
 
@@ -418,11 +404,25 @@ def run_shadow_benchmark(
       declared-public set, not against ``members``; it only stays correct
       because every current caller builds ``members`` from ``CORPUS``.
     * token cost is ``None`` (unmeasured), per question and per engine,
-      whenever a returned path's body is not in ``CORPUS_BODIES`` -- today
-      that is every real-provenance hit, since no real note body is ever
-      allowed to live in this repo (RP1). Unmeasured never contributes 0 to
-      a total; see ``_token_cost`` and the ``*_token_cost_unmeasured_
-      questions`` fields in ``summary``.
+      whenever a returned path's body is not in ``CORPUS_BODIES`` and
+      ``wiki_root`` was not given (or the file could not be read under it)
+      -- unmeasured never contributes 0 to a total; see
+      ``benchmarks.token_cost.measure_token_cost`` and the
+      ``*_token_cost_unmeasured_questions`` fields in ``summary``.
+
+    ``wiki_root`` (issue #40) opts the ``lexical``/``vector`` sides into
+    measuring real-provenance token cost the same way the QMD side (#24)
+    always could: when given, a real note's body is read transiently from
+    this path, counted, and discarded (RP1's read-hash-discard pattern);
+    when ``None`` (the default), every real-provenance hit stays
+    unmeasured, exactly the pre-#40 behavior. This module never reads
+    ``CKP_PILOT_WIKI_ROOT`` or any other environment variable itself --
+    the caller resolves it (e.g. via ``ckp.config.Config.pilot_wiki_root``)
+    and passes it explicitly, the same explicit-composition style
+    ``qmd_config`` already established. Passing the same directory as
+    ``qmd_config.wiki_root`` is expected but not enforced here; the two are
+    independent parameters because ``qmd_config`` can be ``None`` (no QMD
+    comparison) while the platform sides still measure real token cost.
     """
     if trials < 1:
         raise ValueError("trials must be >= 1")
@@ -467,7 +467,7 @@ def run_shadow_benchmark(
     lexical_tokens_total = 0
     vector_tokens_total = 0
     # Unmeasured counters (issue #26 coordinator review): a question whose
-    # token cost could not be measured (``_token_cost`` returned ``None``)
+    # token cost could not be measured (``measure_token_cost`` returned ``None``)
     # must never silently add 0 to the totals above -- it is counted here
     # instead, so the totals' coverage is always stated, never implied.
     lexical_tokens_unmeasured = 0
@@ -652,12 +652,15 @@ def run_shadow_benchmark(
                 provenance_tally["no_answer_violations"] += 1
 
         # ``None`` means unmeasured (some returned path's body is not in
-        # ``CORPUS_BODIES``, e.g. any real-provenance hit today) -- it must
-        # never be added to a total as if it were 0 (issue #26 coordinator
-        # review: a silent 0 here would understate the platform's real token
-        # cost against a QMD baseline that *can* measure the real body).
-        lexical_cost = _token_cost(lexical_paths)
-        vector_cost = _token_cost(vector_paths)
+        # ``CORPUS_BODIES`` and could not be read under ``wiki_root`` either
+        # -- e.g. any real-provenance hit when ``wiki_root`` is ``None``) --
+        # it must never be added to a total as if it were 0 (issue #26
+        # coordinator review: a silent 0 here would understate the
+        # platform's real token cost against a QMD baseline that *can*
+        # measure the real body; issue #40 gives this side that same
+        # ability once a ``wiki_root`` is supplied).
+        lexical_cost = measure_token_cost(lexical_paths, wiki_root=wiki_root)
+        vector_cost = measure_token_cost(vector_paths, wiki_root=wiki_root)
         lexical_measured = lexical_cost is not None
         vector_measured = vector_cost is not None
         if lexical_measured:
@@ -794,7 +797,7 @@ def run_shadow_benchmark(
                 round(qmd_hits / qmd_scored, 4) if qmd_compared and qmd_scored else None
             ),
             # Sums *measured* questions only -- a question whose token cost
-            # is unmeasured (``None``, see ``_token_cost``) contributes
+            # is unmeasured (``None``, see ``measure_token_cost``) contributes
             # nothing here and is counted in the paired
             # ``*_unmeasured_questions`` field instead, so this total's
             # coverage is always stated, never assumed complete.

@@ -52,6 +52,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from benchmarks.token_cost import read_real_body_tokens
+
 #: The ``qmd`` binary name resolved via ``PATH`` by default. Callers running
 #: against a non-PATH install pass an explicit ``binary=`` (an absolute
 #: path is fine there -- it is caller-supplied config, not tracked source)
@@ -152,46 +154,28 @@ def qmd_binary_available(binary: str = DEFAULT_QMD_BINARY) -> bool:
     return shutil.which(binary) is not None
 
 
-def _strip_frontmatter(text: str) -> str:
-    """Drop a leading ``---``-delimited frontmatter block, if present.
-
-    Mirrors the ``lexical``/``vector`` sides counting *body* tokens only
-    (``benchmarks.questions.CORPUS_BODIES`` never includes the frontmatter
-    wrapper) -- deliberately a small local reimplementation rather than an
-    import of ``ckp.pilot.manifest``'s private ``_frontmatter_body``, which
-    returns a different shape (a line list, for a different caller) and is
-    not part of that module's public contract.
-    """
-    if not text.startswith("---"):
-        return text
-    end = text.find("\n---", 3)
-    if end == -1:
-        return text
-    return text[end + len("\n---") :].lstrip("\n")
-
-
 def qmd_token_cost(paths: tuple[str, ...], *, wiki_root: Path) -> int:
     """Whitespace-proxy token count (``TOKEN_COST_METHOD``) for QMD hits.
 
-    Reads each note's bytes from ``wiki_root``, counts, and discards --
-    nothing here is written to disk, logged, or returned as text; only the
-    integer sum leaves this function. A path that cannot be read is skipped
-    rather than raised: by the time this is called, ``paths`` has already
-    passed the corpus-scope filter and the caller (``benchmarks.shadow``)
-    has already committed to ``qmd_compared: True`` for this question, so a
-    single unreadable file should not retroactively invalidate the whole
-    comparison -- it is undercounted instead, same as a lexical/vector
-    engine returning fewer results than expected.
+    Reads each note's body via ``benchmarks.token_cost.read_real_body_tokens``
+    -- issue #40's shared strip-frontmatter-then-count implementation, the
+    same one the platform's own ``lexical``/``vector`` sides now call, so
+    the two sides of the D1 comparison cannot drift apart on how a token is
+    counted. Nothing here is written to disk, logged, or returned as text;
+    only the integer sum leaves this function. A path that cannot be read is
+    skipped rather than raised: by the time this is called, ``paths`` has
+    already passed the corpus-scope filter and the caller
+    (``benchmarks.shadow``) has already committed to ``qmd_compared: True``
+    for this question, so a single unreadable file should not retroactively
+    invalidate the whole comparison -- it is undercounted instead, same as a
+    lexical/vector engine returning fewer results than expected.
     """
     total = 0
     for relative_path in paths:
-        try:
-            text = (wiki_root / relative_path).read_text(
-                encoding="utf-8", errors="replace"
-            )
-        except OSError:
+        tokens = read_real_body_tokens(relative_path, wiki_root=wiki_root)
+        if tokens is None:
             continue
-        total += len(_strip_frontmatter(text).split())
+        total += tokens
     return total
 
 

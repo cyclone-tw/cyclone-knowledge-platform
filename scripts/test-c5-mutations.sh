@@ -353,4 +353,51 @@ expect_red \
   "M16 snapshot metadata verification removed" \
   tests/test_index_memory.py::test_snapshot_metadata_tampering_fails_closed
 
+echo "==> unified token-cost measurement (issue #40)"
+new_case
+replace_once \
+  "benchmarks/token_cost.py" \
+  '        if wiki_root is None:
+            return None
+        real_tokens = read_real_body_tokens(path, wiki_root=wiki_root)
+        if real_tokens is None:
+            return None
+        total += real_tokens' \
+  '        if wiki_root is None:
+            continue  # mutant silently drops an unmeasured path to 0
+        real_tokens = read_real_body_tokens(path, wiki_root=wiki_root)
+        if real_tokens is None:
+            continue  # mutant silently drops an unreadable path to 0
+        total += real_tokens'
+expect_red \
+  "M18 measure_token_cost degrades an unmeasured real path to a silent 0" \
+  tests/test_token_cost.py::test_real_path_is_unmeasured_when_wiki_root_is_none \
+  tests/test_shadow_benchmark.py::test_unmeasured_real_hit_reports_none_not_zero_token_cost
+
+new_case
+replace_once \
+  "benchmarks/token_cost.py" \
+  '    if not text.startswith("---"):
+        return text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return text
+    return text[end + len("\n---") :].lstrip("\n")' \
+  '    return text  # mutant stops stripping frontmatter before counting'
+expect_red \
+  "M19 shared strip-frontmatter drift (QMD side would count the frontmatter block)" \
+  tests/test_token_cost.py::test_frontmatter_is_stripped_before_counting \
+  tests/test_qmd_adapter.py::test_qmd_token_cost_strips_frontmatter_before_counting
+
+new_case
+replace_once \
+  "benchmarks/shadow.py" \
+  '        lexical_cost = measure_token_cost(lexical_paths, wiki_root=wiki_root)
+        vector_cost = measure_token_cost(vector_paths, wiki_root=wiki_root)' \
+  '        lexical_cost = measure_token_cost(lexical_paths, wiki_root=None)  # mutant drops the wiring
+        vector_cost = measure_token_cost(vector_paths, wiki_root=None)  # mutant drops the wiring'
+expect_red \
+  "M20 run_shadow_benchmark stops threading wiki_root into the platform sides" \
+  tests/test_shadow_benchmark.py::test_wiki_root_measures_real_provenance_token_cost_on_lexical_and_vector
+
 echo "all C5 mutations red (baseline green)"

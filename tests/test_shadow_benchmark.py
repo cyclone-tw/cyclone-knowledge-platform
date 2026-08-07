@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from benchmarks.qmd.adapter import QmdBaselineConfig, QmdQueryResult, QmdUnavailable
 from benchmarks.questions import (
+    CORPUS_BODIES,
     KNOWN_COVERAGE_GAPS,
     NON_PUBLIC_PATHS,
     PILOT_QUESTIONS,
@@ -561,6 +562,156 @@ def test_unmeasured_questions_are_excluded_from_the_token_cost_total() -> None:
     )
 
 
+# --- unified token-cost measurement across all three sides (issue #40) ---
+#
+# #24 gave the QMD side a real body reader; #26 made the platform's own
+# ``lexical``/``vector`` sides honestly report ``None`` (never a silent 0)
+# for a real-provenance hit they could not measure. #40 closes the gap: a
+# ``wiki_root`` passed to ``run_shadow_benchmark`` lets those two sides
+# measure the same way QMD always could, via the single shared
+# ``benchmarks.token_cost.measure_token_cost`` implementation. These tests
+# exercise the *wiring* -- that a real integer actually reaches the report
+# -- not just the pure helper (``tests/test_token_cost.py`` covers that).
+
+
+def test_wiki_root_measures_real_provenance_token_cost_on_lexical_and_vector(
+    tmp_path: Path,
+) -> None:
+    stand_in_member, real_question = _stand_in_real_member()
+    members = corpus_members() + (stand_in_member,)
+    mixed = QUESTIONS + (real_question,)
+
+    from benchmarks.shadow import run_shadow_benchmark
+
+    from ckp.index import InMemoryVectorIndex
+
+    real_path = real_question.expected_paths[0]
+    (tmp_path / real_path).parent.mkdir(parents=True, exist_ok=True)
+    # A body deliberately different from the stand-in fixture's indexed
+    # text and with a known, non-trivial whitespace-token count -- proves
+    # the number in the report was actually read from ``wiki_root``, not
+    # from the indexed body or a coincidental match.
+    real_body = "alpha beta gamma delta epsilon zeta eta"  # 7 tokens
+    (tmp_path / real_path).write_text(
+        f"---\nprivacy: internal\n---\n\n{real_body}\n", encoding="utf-8"
+    )
+
+    report = run_shadow_benchmark(
+        members=members,
+        stack=deterministic_stack(),
+        index_provider=InMemoryVectorIndex(),
+        gate=public_gate(),
+        top_k=3,
+        questions=mixed,
+        trials=1,
+        wiki_root=tmp_path,
+    )
+
+    by_id = {q["question_id"]: q for q in report["questions"]}
+    entry = by_id[real_question.question_id]
+    real_tokens = len(real_body.split())
+
+    def _expected_total(paths: list[str]) -> int:
+        # ``top_k`` may return other, synthetic-corpus paths alongside the
+        # real hit -- with ``wiki_root`` given, *every* returned path is now
+        # measurable (the real one from disk, the rest from
+        # ``CORPUS_BODIES``), so the honest expected total sums all of them,
+        # not just the real path this test planted.
+        return sum(
+            real_tokens if path == real_path else len(CORPUS_BODIES[path].split())
+            for path in paths
+        )
+
+    assert real_path in entry["lexical"]["paths"]
+    assert entry["lexical"]["token_cost_measured"] is True
+    assert entry["lexical"]["token_cost"] == _expected_total(entry["lexical"]["paths"])
+    # The real path's own contribution is exactly what was planted on disk,
+    # not a coincidental match from the indexed (different) stand-in body.
+    assert real_tokens <= entry["lexical"]["token_cost"]
+
+    assert real_path in entry["vector"]["paths"]
+    assert entry["vector"]["token_cost_measured"] is True
+    assert entry["vector"]["token_cost"] == _expected_total(entry["vector"]["paths"])
+
+    # The provenance-split summary reflects the same measured numbers, not
+    # an unmeasured count -- proves the value actually flows into the
+    # aggregated report, not just the per-question block. This mixed
+    # question set's only "real" question is ``real_question`` itself.
+    real_block = report["summary"]["provenance"]["real"]
+    assert real_block["lexical_token_cost_unmeasured_questions"] == 0
+    assert real_block["vector_token_cost_unmeasured_questions"] == 0
+    assert real_block["lexical_token_cost_total"] == entry["lexical"]["token_cost"]
+    assert real_block["vector_token_cost_total"] == entry["vector"]["token_cost"]
+
+
+def test_wiki_root_absent_leaves_real_provenance_unmeasured() -> None:
+    """The default (``wiki_root=None``) must be byte-for-byte the pre-#40
+    behavior -- CI has no wiki checkout, so this path must stay honest.
+    """
+    stand_in_member, real_question = _stand_in_real_member()
+    members = corpus_members() + (stand_in_member,)
+    mixed = QUESTIONS + (real_question,)
+
+    from benchmarks.shadow import run_shadow_benchmark
+
+    from ckp.index import InMemoryVectorIndex
+
+    report = run_shadow_benchmark(
+        members=members,
+        stack=deterministic_stack(),
+        index_provider=InMemoryVectorIndex(),
+        gate=public_gate(),
+        top_k=3,
+        questions=mixed,
+        trials=1,
+        # wiki_root intentionally omitted -- must default to None.
+    )
+
+    by_id = {q["question_id"]: q for q in report["questions"]}
+    entry = by_id[real_question.question_id]
+    assert entry["lexical"]["token_cost"] is None
+    assert entry["lexical"]["token_cost_measured"] is False
+    assert entry["vector"]["token_cost"] is None
+    assert entry["vector"]["token_cost_measured"] is False
+
+
+def test_wiki_root_never_leaks_the_real_note_body_into_the_report(
+    tmp_path: Path,
+) -> None:
+    """Complements the QMD-side ``test_qmd_report_never_contains_the_real_
+    note_body_text`` guard: the lexical/vector token-cost read must count
+    and discard, never surface the body text anywhere in the report.
+    """
+    stand_in_member, real_question = _stand_in_real_member()
+    members = corpus_members() + (stand_in_member,)
+    mixed = QUESTIONS + (real_question,)
+
+    from benchmarks.shadow import run_shadow_benchmark
+
+    from ckp.index import InMemoryVectorIndex
+
+    real_path = real_question.expected_paths[0]
+    (tmp_path / real_path).parent.mkdir(parents=True, exist_ok=True)
+    sentinel = "SENTINEL-LEXICAL-VECTOR-BODY-TOKEN-SHOULD-NEVER-LEAK"
+    (tmp_path / real_path).write_text(
+        f"---\nprivacy: internal\n---\n\n{sentinel}\n", encoding="utf-8"
+    )
+
+    report = run_shadow_benchmark(
+        members=members,
+        stack=deterministic_stack(),
+        index_provider=InMemoryVectorIndex(),
+        gate=public_gate(),
+        top_k=3,
+        questions=mixed,
+        trials=1,
+        wiki_root=tmp_path,
+    )
+
+    serialized = json.dumps(report)
+    assert sentinel not in serialized
+
+
 def test_report_shape_and_honesty_fields() -> None:
     report = _run()
     assert report["schema"] == REPORT_SCHEMA
@@ -884,9 +1035,9 @@ def test_all_required_composition_no_defaults() -> None:
 
     signature = inspect.signature(run_shadow_benchmark)
     parameters = signature.parameters
-    # ``trials``, ``index_admissible`` and ``qmd_config`` are the three
-    # intentional exceptions: every *other* composition input the harness
-    # depends on to build a correct report still has no default.
+    # ``trials``, ``index_admissible``, ``qmd_config`` and ``wiki_root`` are
+    # the four intentional exceptions: every *other* composition input the
+    # harness depends on to build a correct report still has no default.
     # ``trials`` (contract §5.3 latency dimension) keeps existing callers
     # working unchanged. ``index_admissible`` (#26) defaults to public-only
     # because widening it is only ever a deliberate pilot-benchmark choice,
@@ -894,10 +1045,19 @@ def test_all_required_composition_no_defaults() -> None:
     # callers must see zero behaviour change from the parameter existing.
     # ``qmd_config`` (#24) defaults to ``None``, meaning "no QMD comparison
     # attempted" -- the same honest-absence shape, not a silent fallback.
+    # ``wiki_root`` (#40) defaults to ``None``, meaning "no live wiki
+    # checkout available" -- every real-provenance token cost stays
+    # unmeasured, the same honest-absence shape ``qmd_config`` established,
+    # and every pre-#40 caller sees zero behaviour change.
     # ``questions`` joined the required-no-default set in #26: which
     # questions to score is a composition input exactly like
     # ``members``/``stack``/``gate``, not a hardcoded import.
-    assert set(parameters) - {"trials", "index_admissible", "qmd_config"} == {
+    assert set(parameters) - {
+        "trials",
+        "index_admissible",
+        "qmd_config",
+        "wiki_root",
+    } == {
         "members",
         "stack",
         "index_provider",
@@ -911,7 +1071,7 @@ def test_all_required_composition_no_defaults() -> None:
             assert parameter.default == 5
         elif name == "index_admissible":
             assert parameter.default == frozenset({PrivacyClass.PUBLIC})
-        elif name == "qmd_config":
+        elif name in ("qmd_config", "wiki_root"):
             assert parameter.default is None
         else:
             assert parameter.default is inspect.Parameter.empty
