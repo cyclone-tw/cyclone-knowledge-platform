@@ -46,28 +46,61 @@ corpus. The report is honest about what it measures:
   still pass its own "declared public" set; this module does not do that;
 * the question set (``questions``, a required composition input since #26)
   may mix ``provenance="real"`` and ``provenance="synthetic"`` questions.
-  Every count in ``summary`` that is a *rate* (hit rate, stale-exclusion
-  rate) or a *correctness tally* is reported twice: once pooled across all
-  of ``questions`` (the pre-#26 keys, unchanged in meaning and computation),
-  and once more under ``summary["provenance"]["real"]`` /
-  ``["synthetic"]``, split by each question's own ``provenance``. The pooled
-  numbers exist for continuity; they must never be read alone once a report
-  mixes real and synthetic questions, because a good synthetic score can
-  hide a bad real one (or the reverse) -- the pooled hit rate on a mixed set
-  answers "how did the whole set do", not "how did the platform do on real
-  Cyclone-Wiki notes", and the two questions are not the same one. Token
-  cost for a real-provenance question is ``None`` (unmeasured) whenever a
-  returned path's body is not in ``benchmarks.questions.CORPUS_BODIES``,
-  which (by RP1) never contains a real note's body -- so today, every real
-  question with any hit is unmeasured. This module does not fabricate a
-  real-body reader to fix that (issue #24 is already building one for the
-  QMD side, via the same read-hash-discard pattern
-  ``src/ckp/pilot/manifest.py`` uses; duplicating it here would give two
-  implementations that can drift). Unifying the two sides -- so a real
-  question's token cost is measured the same way on both sides of the
-  shadow comparison -- is follow-up work, not this module's job today. See
-  ``benchmarks.questions.KNOWN_COVERAGE_GAPS`` and the module docstring
-  there for the categories a real note does not exist to test at all;
+  The pooled numbers exist for continuity with pre-#26 reports; they must
+  never be read alone once a report mixes real and synthetic questions,
+  because a good synthetic score can hide a bad real one (or the reverse)
+  -- the pooled hit rate on a mixed set answers "how did the whole set do",
+  not "how did the platform do on real Cyclone-Wiki notes", and the two
+  questions are not the same one. Token cost for a real-provenance
+  question is ``None`` (unmeasured) whenever a returned path's body is not
+  in ``benchmarks.questions.CORPUS_BODIES``, which (by RP1) never contains
+  a real note's body -- so today, every real question with any hit is
+  unmeasured. This module does not fabricate a real-body reader to fix
+  that (issue #24 is already building one for the QMD side, via the same
+  read-hash-discard pattern ``src/ckp/pilot/manifest.py`` uses;
+  duplicating it here would give two implementations that can drift).
+  Unifying the two sides -- so a real question's token cost is measured the
+  same way on both sides of the shadow comparison -- is follow-up work, not
+  this module's job today. See ``benchmarks.questions.KNOWN_COVERAGE_GAPS``
+  and the module docstring there for the categories a real note does not
+  exist to test at all;
+* issue #26 Round 3 (Codex): every *question-level* count and rate in
+  ``summary`` is reported twice -- once pooled (the pre-#26 keys, unchanged
+  in meaning and computation) and once split under
+  ``summary["provenance"]["real"]`` / ``["synthetic"]``. Round 2 split hit
+  rate, token cost, and citation correctness only; Round 3 closes the rest
+  of the audit: ``lexical_stale_excluded`` / ``vector_stale_excluded`` and
+  their ``_rate`` (denominator is this provenance's own question count,
+  never the pooled ``total_questions`` -- an unsplit denominator is the
+  same shape of bug as an unsplit numerator), ``lexical_no_answer_correct``
+  (``None``, not a fake pass, in a provenance that asked no ``no-answer``
+  question at all), and ``privacy_false_negatives`` (split as a diagnostic
+  convenience -- see below, it was never a self-proof risk pooled). Two
+  fields are deliberately **not** split, with the reasoning kept next to
+  them rather than left implicit:
+
+  * ``privacy_false_positives`` / ``privacy_false_positive_paths`` are
+    corpus-level, not question-level -- computed once, before any question
+    is asked, from ``PUBLIC_DECLARED_PATHS - <what the plan indexed>``.
+    There is no per-question attribution to split by, and
+    ``PUBLIC_DECLARED_PATHS`` only ever names synthetic paths (D2 froze
+    every real note at ``internal``, never ``public``), so this metric is
+    already synthetic-only in substance, not merely in reporting.
+  * ``latency_ms`` stays pooled-only. Unlike a hit rate or a stale-exclusion
+    rate, wall-clock latency cannot be inflated by writing an easy
+    synthetic question -- the self-proof risk this module exists to guard
+    against does not apply the same way to a performance measurement. D1's
+    latency threshold is also evaluated against the pooled report, not a
+    per-provenance one. Splitting it would need per-provenance trial
+    sample pools, which nothing here currently threads through the
+    ``trials`` retry loop; left as a documented gap, not a silent one.
+
+  ``rebuild.point_count`` and every top-level metadata field (``schema``,
+  ``corpus_version``, ``coverage_gaps``, ``index_provider``,
+  ``composed_revision``, ``*_revision``, ``semantic``/``semantic_note``,
+  ``token_cost_method``/``token_cost_note``, ``top_k``) describe the run
+  itself, not an aggregate over questions -- "split by provenance" does not
+  apply to them at all;
 * everything except ``latency_ms`` is reproducible byte-for-byte from the
   same commit, and tests pin exactly that.
 
@@ -172,10 +205,26 @@ def _provenance_summary(tally: dict[str, int]) -> dict:
     ``lexical_token_cost_unmeasured_questions`` /
     ``vector_token_cost_unmeasured_questions`` instead, so the total's
     coverage is always stated next to it, never silently assumed complete.
+
+    ``*_stale_excluded_rate`` divides by ``question_count`` (this
+    provenance's total question count), never by the pooled
+    ``total_questions`` -- issue #26 Round 3 (Codex): the pooled
+    denominator would silently blend one provenance's question count into
+    the other's rate, the exact same shape of bug as an unsplit numerator.
+
+    ``lexical_no_answer_correct`` is ``None`` when this provenance asked no
+    ``no-answer`` question at all (today: always the synthetic provenance
+    only -- no real D2 note is a no-answer fixture), the same "not asked,
+    not a failure" rule ``lexical_hit_rate`` already follows. There is no
+    vector equivalent, matching the pooled field: a cosine engine always
+    ranks *something*, so scoring its abstention would fake a capability
+    (module docstring).
     """
     scored_questions = tally["scored_questions"]
+    question_count = tally["question_count"]
+    no_answer_total = tally["no_answer_total"]
     return {
-        "question_count": tally["question_count"],
+        "question_count": question_count,
         "scored_questions": scored_questions,
         "lexical_hit_rate": (
             round(tally["lexical_hits"] / scored_questions, 4)
@@ -196,6 +245,28 @@ def _provenance_summary(tally: dict[str, int]) -> dict:
             "vector_token_cost_unmeasured_questions"
         ],
         "citation_correct_questions": tally["citation_correct_questions"],
+        # Diagnostic split, not a self-proof fix (issue #26 Round 3 audit):
+        # this is zero-tolerance already -- a leak from *either* provenance
+        # makes the pooled count non-zero and fails the gate, so pooling it
+        # cannot hide a real problem the way an averaged rate can. Split
+        # anyway because it is cheap (already tallied per question) and
+        # tells a reviewer *which* provenance leaked.
+        "privacy_false_negatives": tally["privacy_false_negatives"],
+        "lexical_stale_excluded": tally["lexical_stale_excluded"],
+        "vector_stale_excluded": tally["vector_stale_excluded"],
+        "lexical_stale_excluded_rate": (
+            round(tally["lexical_stale_excluded"] / question_count, 4)
+            if question_count
+            else None
+        ),
+        "vector_stale_excluded_rate": (
+            round(tally["vector_stale_excluded"] / question_count, 4)
+            if question_count
+            else None
+        ),
+        "lexical_no_answer_correct": (
+            None if no_answer_total == 0 else tally["no_answer_violations"] == 0
+        ),
     }
 
 
@@ -354,6 +425,11 @@ def run_shadow_benchmark(
         "vector_token_cost_total": 0,
         "vector_token_cost_unmeasured_questions": 0,
         "citation_correct_questions": 0,
+        "privacy_false_negatives": 0,
+        "lexical_stale_excluded": 0,
+        "vector_stale_excluded": 0,
+        "no_answer_total": 0,
+        "no_answer_violations": 0,
     }
     by_provenance: dict[str, dict[str, int]] = {
         "real": dict(_provenance_zero),
@@ -403,6 +479,17 @@ def run_shadow_benchmark(
         privacy_false_negatives += (len(raw_lexical_paths) - len(lexical_paths)) + (
             len(raw_vector_paths) - len(vector_paths)
         )
+        # Duplicated rather than factored out of the pooled line above on
+        # purpose: scripts/test-c5-mutations.sh M9 pins that exact pooled
+        # assignment verbatim (a mutant silences leak counting by replacing
+        # its whole right-hand side); refactoring it to share a temporary
+        # with this provenance-split accumulation would require updating
+        # that pinned string for a purely cosmetic reason, and the
+        # coordinator's Round 2 review was explicit that a pinned guard
+        # must never be touched except to make it *stronger*.
+        provenance_tally["privacy_false_negatives"] += (
+            len(raw_lexical_paths) - len(lexical_paths)
+        ) + (len(raw_vector_paths) - len(vector_paths))
 
         # Citation correctness (§5.3): every lexical citation must bind the
         # path it ranks and the exact snapshot revision served; the vector
@@ -428,8 +515,11 @@ def run_shadow_benchmark(
             vector_hits += 1 if vector_hit else 0
             provenance_tally["lexical_hits"] += 1 if lexical_hit else 0
             provenance_tally["vector_hits"] += 1 if vector_hit else 0
-        elif question.category == "no-answer" and lexical_paths:
-            lexical_no_answer_correct = False
+        elif question.category == "no-answer":
+            provenance_tally["no_answer_total"] += 1
+            if lexical_paths:
+                lexical_no_answer_correct = False
+                provenance_tally["no_answer_violations"] += 1
 
         # ``None`` means unmeasured (some returned path's body is not in
         # ``CORPUS_BODIES``, e.g. any real-provenance hit today) -- it must
@@ -457,8 +547,10 @@ def run_shadow_benchmark(
         vector_stale_returned = any(path in SUPERSEDED_PATHS for path in vector_paths)
         if not lexical_stale_returned:
             lexical_stale_excluded += 1
+            provenance_tally["lexical_stale_excluded"] += 1
         if not vector_stale_returned:
             vector_stale_excluded += 1
+            provenance_tally["vector_stale_excluded"] += 1
 
         question_reports.append(
             {

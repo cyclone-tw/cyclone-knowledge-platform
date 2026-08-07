@@ -306,6 +306,92 @@ def test_provenance_split_reflects_a_genuine_real_miss_against_synthetic_hits() 
         assert entry["vector"]["hit"] is True, question.question_id
 
 
+def test_provenance_split_covers_stale_exclusion_with_correct_denominators() -> None:
+    """Issue #26 Round 3 (Codex Finding): stale exclusion was still pooled-
+    only after Round 2 split hit rate/token cost/citation.
+
+    Both engines here always return *something* up to ``top_k`` even for an
+    off-topic query -- documented behavior (module docstring: "a cosine
+    engine always ranks *something*"), and the lexical side over this
+    fixture corpus does too -- so ``REAL_QUESTIONS[0]`` mixed into the
+    default synthetic-only fixture corpus reliably gets back the same
+    top-3 spillover on both engines, which happens to include the
+    superseded note: a real question can never be a *correct* hit (D2's
+    real notes are never in this fixture corpus at all), but it can
+    absolutely be an *honest* stale-exclusion failure, exactly like any
+    other question. Pinned empirically (see the values asserted below) as
+    a real, deterministic real/synthetic asymmetry, not a contrived one:
+    the synthetic block is imperfect for a different, already-tested
+    reason (``q04-latest-status``'s legitimate superseded pair), and the
+    real block is imperfect for this one -- two different rates, from two
+    different causes, which is exactly what must never collapse into one
+    pooled number.
+
+    Also pins the denominator: each provenance's rate must divide by that
+    provenance's own question count, never by the pooled
+    ``total_questions`` -- an unsplit denominator silently produces a wrong
+    rate for whichever provenance's question count differs from the total,
+    the same shape of bug as an unsplit numerator.
+    """
+    mixed = QUESTIONS + (REAL_QUESTIONS[0],)
+    report = _run(questions=mixed)
+    provenance = report["summary"]["provenance"]
+
+    synthetic = provenance["synthetic"]
+    real = provenance["real"]
+
+    # Baseline synthetic behavior (q04's superseded pair is a genuine hit
+    # on both engines at the default fixture corpus): pinned so a
+    # regression in the underlying retrieval, not just the split
+    # accounting, would also be visible here.
+    assert synthetic["lexical_stale_excluded"] == 9
+    assert synthetic["vector_stale_excluded"] == 8
+    assert synthetic["question_count"] == len(QUESTIONS)
+    assert synthetic["lexical_stale_excluded_rate"] == round(9 / len(QUESTIONS), 4)
+    assert synthetic["vector_stale_excluded_rate"] == round(8 / len(QUESTIONS), 4)
+
+    # The one real question: both engines' top-k spillover for this query
+    # happens to include the superseded note, so it is *not* excluded --
+    # pinned to the observed, deterministic value (0 of 1), not assumed.
+    assert real["question_count"] == 1
+    assert real["lexical_stale_excluded"] == 0
+    assert real["vector_stale_excluded"] == 0
+    assert real["lexical_stale_excluded_rate"] == 0.0
+    assert real["vector_stale_excluded_rate"] == 0.0
+
+    # The two provenances must disagree -- proves the rate is not silently
+    # reading the same (pooled) number for both.
+    assert (
+        synthetic["lexical_stale_excluded_rate"] != real["lexical_stale_excluded_rate"]
+    )
+    assert synthetic["vector_stale_excluded_rate"] != real["vector_stale_excluded_rate"]
+
+    # Pooled continues to sum both, unchanged in meaning.
+    assert report["summary"]["lexical_stale_excluded"] == (
+        synthetic["lexical_stale_excluded"] + real["lexical_stale_excluded"]
+    )
+    assert report["summary"]["vector_stale_excluded"] == (
+        synthetic["vector_stale_excluded"] + real["vector_stale_excluded"]
+    )
+
+
+def test_provenance_split_covers_no_answer_correctness() -> None:
+    """No real D2 note is a ``no-answer`` fixture, so the real provenance
+    must report ``None`` ("not asked"), never a fake ``True`` -- while the
+    synthetic provenance, which does own ``q10-no-answer``, reports an
+    actual bool. Two different *kinds* of value, not just two different
+    numbers, so a mutant that pools this field cannot coincidentally still
+    pass by returning the same bool for both.
+    """
+    mixed = QUESTIONS + (REAL_QUESTIONS[0],)
+    report = _run(questions=mixed)
+    provenance = report["summary"]["provenance"]
+
+    assert provenance["synthetic"]["lexical_no_answer_correct"] is True
+    assert provenance["real"]["lexical_no_answer_correct"] is None
+    assert report["summary"]["lexical_no_answer_correct"] is True
+
+
 def test_provenance_with_no_questions_reports_none_not_zero() -> None:
     """A provenance absent from ``questions`` must read as "not asked"
     (``None`` hit rate), never as "asked and failed" (``0.0``) -- the same
@@ -592,6 +678,35 @@ def test_privacy_violations_are_counted_and_redacted() -> None:
     rendered = json.dumps(report, sort_keys=True, ensure_ascii=False)
     assert "learner-record.md" not in rendered
     assert "never-indexed.md" not in rendered
+
+
+def test_provenance_split_covers_privacy_false_negatives_asymmetrically() -> None:
+    """Issue #26 Round 3 (Codex audit): ``privacy_false_negatives`` is
+    zero-tolerance, so pooling it never hides a *pass/fail* problem the way
+    an averaged rate can -- but it was still pooled-only, so a reviewer
+    could not tell *which* provenance leaked. Split as a diagnostic
+    convenience (documented in ``_provenance_summary``), verified here with
+    a fixture where the two provenances get a genuinely different raw
+    count: ``_LeakyIndex`` injects the same two leaked hits on every single
+    search call, so ten synthetic questions accumulate ten times the leaks
+    of the one real question mixed in -- 20 vs 2, never equal, and each
+    independently checked against its own question count rather than one
+    shared pooled figure.
+    """
+    mixed = QUESTIONS + (REAL_QUESTIONS[0],)
+    report = _run(index_provider=_LeakyIndex(), questions=mixed)
+    provenance = report["summary"]["provenance"]
+
+    assert provenance["synthetic"]["privacy_false_negatives"] == 2 * len(QUESTIONS)
+    assert provenance["real"]["privacy_false_negatives"] == 2 * 1
+    assert (
+        provenance["synthetic"]["privacy_false_negatives"]
+        != provenance["real"]["privacy_false_negatives"]
+    )
+    assert report["summary"]["privacy_false_negatives"] == (
+        provenance["synthetic"]["privacy_false_negatives"]
+        + provenance["real"]["privacy_false_negatives"]
+    )
 
 
 def test_privacy_false_positives_and_false_negatives_stay_separate() -> None:
