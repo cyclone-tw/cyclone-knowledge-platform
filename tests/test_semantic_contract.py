@@ -2,12 +2,17 @@
 
 Every test in this file runs without the pinned model weights present --
 they check structure, not inference output. The weight-gated behavior tests
-(golden digests, determinism, descriptor honesty against a real loaded
-model) live in ``tests/test_semantic_embedding_provider.py`` and follow the
-same skip/``CKP_REQUIRE_SEMANTIC=1`` pattern ``tests/test_index_qdrant.py``
-uses for Qdrant. Keeping the two apart is what lets
-``scripts/test-c25-semantic-mutations.sh`` run everywhere, including a
-laptop with no model cache and no network.
+(determinism, semantic relationships, and within-host reproducibility against
+a real loaded model) live in ``tests/test_semantic_embedding_provider.py``
+and follow the same skip/``CKP_REQUIRE_SEMANTIC=1`` pattern used by
+``tests/test_index_qdrant.py`` for Qdrant. Keeping the two apart lets
+``scripts/test-c25-semantic-mutations.sh`` run everywhere, including laptops
+with no model cache and no network. This file's guardrails are asset digest
+pinning (catching missing/tampered/truncated/prefix-collision issues) and
+semantic relationship thresholds (``RELATED_MIN``/``UNRELATED_MAX`` from
+``semantic_fixtures.py``), which replaced host-specific frozen vectors that
+proved impractical across CPU architectures -- see
+``test_semantic_embedding_provider.py``'s module docstring for details.
 """
 
 from __future__ import annotations
