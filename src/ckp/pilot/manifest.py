@@ -99,6 +99,14 @@ class PilotManifestEntry:
 # unguarded even though PilotManifestEntry itself never gained the field).
 _ALLOWED_NOTE_KEYS = frozenset({"relative_path", "content_sha256"})
 
+# The strict schema for the manifest file's *top level* -- the same
+# discipline as `_ALLOWED_NOTE_KEYS`, one level up (issue #36). PR #33 only
+# guarded keys inside `[[note]]` tables; Codex Round 2 found that a top-level
+# `body = "leaked note body"` (a key that is not `note` at all, so it never
+# reaches the per-entry loop below) still loaded successfully. Accepting and
+# ignoring an undeclared top-level key is the same RP1 hole one layer up.
+_ALLOWED_TOP_LEVEL_KEYS = frozenset({"note"})
+
 
 @dataclass(frozen=True)
 class PilotManifest:
@@ -182,6 +190,16 @@ def load_frozen_manifest(config: Config) -> PilotManifest:
         raise PilotBindingError(
             f"frozen pilot manifest {manifest_path} is not valid TOML: {exc}"
         ) from exc
+
+    unknown_top_level = sorted(set(parsed) - _ALLOWED_TOP_LEVEL_KEYS)
+    if unknown_top_level:
+        raise PilotBindingError(
+            f"{manifest_path}: top-level field(s) {unknown_top_level!r} this "
+            f"schema does not define; only {sorted(_ALLOWED_TOP_LEVEL_KEYS)!r} "
+            "are allowed -- a manifest field the code silently ignores (e.g. "
+            "a top-level `body`) is exactly the RP1 hole this refuses rather "
+            "than accepts-and-ignores"
+        )
 
     notes = parsed.get("note")
     if not isinstance(notes, list) or not notes:

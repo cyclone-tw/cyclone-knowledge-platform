@@ -133,6 +133,53 @@ def test_load_frozen_manifest_rejects_any_undeclared_note_field(
     assert "#0" in message
 
 
+@pytest.mark.parametrize(
+    "extra_key,extra_value",
+    [
+        ("body", '"leaked note body"'),
+        ("content", '"leaked note body"'),
+        ("privacy", '"public"'),
+        ("note_body_b64", '"bGVha2Vk"'),
+    ],
+)
+def test_load_frozen_manifest_rejects_any_undeclared_top_level_field(
+    tmp_path,
+    extra_key: str,
+    extra_value: str,
+) -> None:
+    """RP1 at the file-format layer, one level above `[[note]]` (issue #36).
+
+    PR #33 hardened the schema inside each `[[note]]` table but left the
+    manifest file's top level unguarded: Codex Round 2 found that a bare
+    `body = "leaked note body"` line at the top of `pilot-manifest.toml`
+    still loaded successfully, because it never reaches the `[[note]]` loop
+    at all. Every real `[[note]]` entry here is otherwise valid.
+
+    Parametrised beyond `body` on purpose, same reasoning as the `[[note]]`
+    field test above: the rule is "no undeclared top-level key", not "no key
+    literally named body". A loader hardened only against the one field this
+    review happened to name would pass a body-only test while still
+    accepting `content` or a base64 smuggling field at the top level.
+    """
+    manifest_file = tmp_path / "pilot-manifest.toml"
+    notes = "\n".join(
+        f'[[note]]\nrelative_path = "{path}"\ncontent_sha256 = "{"0" * 64}"'
+        for path in PILOT_NOTE_PATHS
+    )
+    manifest_file.write_text(
+        f"{extra_key} = {extra_value}\n\n{notes}\n", encoding="utf-8"
+    )
+
+    config = load_config(env={"CKP_PILOT_MANIFEST_PATH": str(manifest_file)})
+    with pytest.raises(PilotBindingError) as excinfo:
+        load_frozen_manifest(config)
+    message = str(excinfo.value)
+    # Match the offending key, not the boilerplate: the error text explains
+    # the rule with `body` as its example, so `match="body"` would pass for
+    # every parameter regardless of which key actually tripped the check.
+    assert repr(extra_key) in message, message
+
+
 def test_bind_pilot_corpus_rejects_an_injected_manifest_outside_the_allowlist(
     tmp_path,
 ) -> None:
