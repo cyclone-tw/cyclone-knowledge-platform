@@ -127,6 +127,41 @@ def test_full_precision_timestamp_maps_directly_to_created_at() -> None:
     assert "created_at" not in {g.field for g in result.gaps}
 
 
+@pytest.mark.parametrize(
+    "raw_timestamp",
+    [
+        pytest.param("2025-05-01T09:30:00+08:00", id="colon-offset"),
+        pytest.param("2025-05-01T09:30:00+0800", id="no-colon-offset"),
+        pytest.param("2025-05-01T09:30:00+08", id="hour-only-offset"),
+        pytest.param("2025-05-01T09:30:00-05:00", id="negative-colon-offset"),
+        pytest.param("2025-05-01T09:30:00.123456+08:00", id="fractional-seconds"),
+        pytest.param("2025-05-01T01:30:00Z", id="zulu"),
+        pytest.param("2025-05-01 09:30:00+08:00", id="space-separator"),
+    ],
+)
+def test_all_legal_iso8601_offset_forms_map_without_a_gap(raw_timestamp: str) -> None:
+    """`+0800`, `+08`, and `+08:00` are all legal ISO 8601 offsets (§4.2.5
+    permits omitting the colon and/or the minutes) and all carry identical
+    evidence. Rejecting the terser legal forms while accepting the verbose
+    one would itself be a honesty bug in the other direction: discarding
+    evidence that exists and mislabeling it a gap is not more honest than
+    fabricating evidence that does not exist -- Codex review round 2 flagged
+    exactly this on `+0800`/`+08`.
+    """
+    metadata = dict(RAW_V01_METADATA)
+    metadata["timestamp"] = raw_timestamp
+    metadata["generated"] = {"by": "test/fixture", "at": "2026-07-27T10:00:00+08:00"}
+    result = convert_openwiki_v01(metadata)
+    assert result.metadata["created_at"] == raw_timestamp
+    assert "created_at" not in {g.field for g in result.gaps}
+    # generated is supplied here specifically so `legacy`/`metadata_gaps`
+    # stay fully absent -- proof that a sufficient timestamp produces zero
+    # gaps, not just "one fewer gap than the date-only case".
+    assert "legacy" not in result.metadata
+    assert "metadata_gaps" not in result.metadata
+    assert "timestamp" not in result.metadata
+
+
 def test_existing_created_at_supersedes_v01_timestamp() -> None:
     metadata = dict(RAW_V01_METADATA)
     metadata["created_at"] = "2026-07-27T10:00:00+08:00"
@@ -146,6 +181,46 @@ def test_existing_sources_supersedes_v01_citations() -> None:
     assert result.metadata["sources"] == ["https://existing.example.org"]
     dropped_fields = {d.field for d in result.dropped}
     assert "citations" in dropped_fields
+
+
+def test_duplicate_citations_case_variant_is_dropped_and_recorded() -> None:
+    """`citations` and `Citations` both present with identical values.
+
+    Codex review round 2: case variants are legacy data's most common way
+    to duplicate a field, and the pre-fix adapter let the non-priority key
+    disappear with no trace in any of mapped/dropped/gaps/unmapped. The
+    entire point of those four lists is that nothing leaves the note
+    unaccounted for -- a silent-loss path here breaks that guarantee no
+    matter how unlikely OpenWiki itself is to emit this shape.
+
+    Mutation check: remove the ``dropped.append(...)`` call in the
+    duplicate-key branch of ``_convert_citations`` -- this assertion goes
+    red because ``"Citations"`` would no longer appear in
+    ``result.dropped``.
+    """
+    metadata = dict(RAW_V01_METADATA)
+    metadata["Citations"] = list(metadata["citations"])  # identical duplicate
+    result = convert_openwiki_v01(metadata)
+    assert result.metadata["sources"] == ["https://example.org"]
+    assert "citations" not in result.metadata
+    assert "Citations" not in result.metadata
+    dropped_fields = {d.field: d for d in result.dropped}
+    assert "Citations" in dropped_fields
+    assert "duplicate" in dropped_fields["Citations"].reason.lower()
+    # It is accounted for, not just absent from the output -- unmapped
+    # must not *also* claim credit for it.
+    assert "Citations" not in result.unmapped
+
+
+def test_conflicting_citations_case_variant_raises() -> None:
+    """`citations` and `Citations` present with *different* values: refuse
+    to guess which legacy declaration is authoritative rather than pick one
+    silently.
+    """
+    metadata = dict(RAW_V01_METADATA)
+    metadata["Citations"] = ["https://different.example.org"]
+    with pytest.raises(OpenWikiConversionError, match="conflicting"):
+        convert_openwiki_v01(metadata)
 
 
 def test_present_generated_block_is_never_touched() -> None:

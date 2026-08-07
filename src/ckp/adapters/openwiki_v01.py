@@ -51,11 +51,19 @@ _TIMESTAMP_KEY = "timestamp"
 _CITATIONS_KEYS = ("citations", "Citations")
 
 # A `created_at` must carry an explicit time-of-day *and* an explicit UTC
-# offset (`Z` or `+HH:MM`/`-HH:MM`) before this adapter will treat it as
-# sufficient evidence. Deliberately stricter than the wiki validator's own
-# `_iso8601_ok`, which also accepts bare dates.
+# offset before this adapter will treat it as sufficient evidence.
+# Deliberately stricter than the wiki validator's own `_iso8601_ok` (which
+# also accepts bare dates -- see the module docstring), but deliberately
+# *not* narrower than real ISO 8601: all of `Z`, `+08:00`, `+0800`, and
+# `+08` are legal ISO 8601 offset forms (ISO 8601 §4.2.5 permits omitting
+# the colon and/or the minutes), and a timestamp using any of them carries
+# exactly as much evidence as one that spells the colon out. Rejecting
+# `+0800` while accepting `+08:00` would itself be a honesty bug in the
+# other direction: discarding evidence that exists and mislabeling it a
+# gap is not more honest than fabricating evidence that doesn't -- it is
+# the same failure pointed the other way.
 _HAS_TIME_AND_OFFSET_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$"
+    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}(:?\d{2})?)$"
 )
 
 # Fields this adapter recognizes as already Cyclone-Profile-shaped, so it
@@ -206,10 +214,43 @@ def _convert_citations(
     mapped: list[FieldMapping],
     dropped: list[FieldDrop],
 ) -> None:
-    citations_key = next((k for k in _CITATIONS_KEYS if k in source), None)
-    if citations_key is None:
+    # `_CITATIONS_KEYS` order is the declared priority when both the
+    # lowercase and capitalized legacy spellings show up at once (dirty
+    # legacy data's most common shape is exactly this kind of case
+    # variant). Whichever key is *not* chosen must still be accounted for
+    # -- either as a recorded duplicate drop, or as a hard failure -- never
+    # as a value that just stops existing.
+    present_keys = [k for k in _CITATIONS_KEYS if k in source]
+    if not present_keys:
         return
+    citations_key, *extra_keys = present_keys
     raw_citations = output.pop(citations_key)
+
+    for extra_key in extra_keys:
+        extra_value = output.pop(extra_key)
+        if extra_value == raw_citations:
+            dropped.append(
+                FieldDrop(
+                    field=extra_key,
+                    value=extra_value,
+                    reason=(
+                        f"`{extra_key}` duplicates `{citations_key}` with the "
+                        "identical value -- both legacy spellings were "
+                        f"present; keeping `{citations_key}` (declared "
+                        f"priority order: {list(_CITATIONS_KEYS)}) and "
+                        "dropping the redundant duplicate rather than "
+                        "letting it disappear unrecorded."
+                    ),
+                )
+            )
+            continue
+        raise OpenWikiConversionError(
+            f"conflicting legacy citation fields: `{citations_key}`="
+            f"{raw_citations!r} and `{extra_key}`={extra_value!r} are both "
+            "present with different values. Guessing which one is "
+            "authoritative on legacy data is worse than failing loudly; "
+            "resolve the conflict in the source note before converting."
+        )
 
     if source.get("sources") is not None:
         dropped.append(
