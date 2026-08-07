@@ -199,6 +199,80 @@ def test_syntactically_shaped_but_nonexistent_values_still_gap(
     assert "created_at" in {g.field for g in result.gaps}
 
 
+@pytest.mark.parametrize(
+    "raw_timestamp",
+    [
+        pytest.param("2025-05-01T09:30:00+14:00", id="plus-14-kiribati-boundary"),
+        pytest.param("2025-05-01T09:30:00-12:00", id="minus-12-baker-island-boundary"),
+    ],
+)
+def test_real_world_offset_boundaries_are_accepted(raw_timestamp: str) -> None:
+    """UTC+14 (Kiribati's Line Islands) and UTC-12 (the westernmost real
+    offset) are both real timezones and must map to created_at -- the
+    real-world range is UTC-12..UTC+14, not symmetric.
+    """
+    metadata = dict(RAW_V01_METADATA)
+    metadata["timestamp"] = raw_timestamp
+    result = convert_openwiki_v01(metadata)
+    assert result.metadata["created_at"] == raw_timestamp
+    assert "created_at" not in {g.field for g in result.gaps}
+
+
+@pytest.mark.parametrize(
+    "raw_timestamp",
+    [
+        pytest.param("2025-05-01T09:30:00-14:00", id="minus-14-does-not-exist"),
+        pytest.param("2025-05-01T09:30:00+15:00", id="plus-15-does-not-exist"),
+    ],
+)
+def test_offsets_outside_the_real_world_asymmetric_range_still_gap(
+    raw_timestamp: str,
+) -> None:
+    """`-14:00` is *inside* a naive ``abs(offset) <= 14h`` symmetric check
+    but is not a real timezone -- issue #37: the real-world range is
+    asymmetric (UTC-12..UTC+14), so a value two hours further west than the
+    real boundary must still gap, even though `+14:00` (equally far from
+    UTC on the other side) is legitimate.
+
+    Mutation check: replace the two-sided ``offset < _MIN_UTC_OFFSET or
+    offset > _MAX_UTC_OFFSET`` bound with the old symmetric
+    ``abs(offset) > _MAX_UTC_OFFSET`` -- this assertion goes red for the
+    `-14:00` case because that value would then incorrectly map to
+    `created_at`.
+    """
+    metadata = dict(RAW_V01_METADATA)
+    metadata["timestamp"] = raw_timestamp
+    result = convert_openwiki_v01(metadata)
+    assert "created_at" not in result.metadata
+    assert "created_at" in {g.field for g in result.gaps}
+
+
+@pytest.mark.parametrize(
+    "raw_timestamp",
+    [
+        pytest.param("2025-05-01x09:30:00+08:00", id="letter-separator"),
+        pytest.param("2025-05-01_09:30:00+08:00", id="underscore-separator"),
+        pytest.param("2025-05-01|09:30:00+08:00", id="pipe-separator"),
+    ],
+)
+def test_non_standard_separator_still_gaps(raw_timestamp: str) -> None:
+    """`datetime.fromisoformat` accepts any single character as the
+    date/time separator, but no real producer (`Date.toISOString()`, or
+    hand-written YAML using `T`/space) ever emits anything but `T` or a
+    space -- issue #37 decision: tighten to only those two.
+
+    Mutation check: remove the ``_has_acceptable_separator`` guard from
+    ``_offset_aware_datetime_evidence`` -- this assertion goes red because
+    `created_at` would then be set from a value using a nonstandard
+    separator that `fromisoformat` happens to tolerate.
+    """
+    metadata = dict(RAW_V01_METADATA)
+    metadata["timestamp"] = raw_timestamp
+    result = convert_openwiki_v01(metadata)
+    assert "created_at" not in result.metadata
+    assert "created_at" in {g.field for g in result.gaps}
+
+
 def test_offset_aware_datetime_object_maps_to_created_at() -> None:
     """The production path: PyYAML parses an *unquoted* ISO timestamp into
     a `datetime` object, and OpenWiki v0.1's real `Date.toISOString()`

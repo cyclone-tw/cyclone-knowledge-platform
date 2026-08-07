@@ -61,8 +61,22 @@ next reader does not reintroduce them:
    range-checking here instead of a bigger regex. The one thing Python's
    own offset check does *not* enforce is realism -- it allows any offset
    under 24h, including ones no real timezone uses (`+23:59`) -- so
-   `_MAX_UTC_OFFSET` narrows that down to the actual UTC-12..UTC+14 range
-   real timezones occupy.
+   `_MIN_UTC_OFFSET`/`_MAX_UTC_OFFSET` narrow that down to the actual
+   real-world UTC-12..UTC+14 range, which is *not* symmetric: UTC+14
+   (Kiribati's Line Islands) is two hours further from UTC than the
+   westernmost real offset, UTC-12. `abs(offset) <= 14h` would silently
+   let a nonexistent `UTC-14:00` through (issue #37, found in PR #35
+   round 3 too, but not blocking that round); the two-sided bound below
+   is what actually matches the comment it lives next to.
+3. **`datetime.fromisoformat` accepts any single character as the
+   date/time separator**, not just `T` and space -- `'2025-05-01x09:30:00
+   +08:00'` parses cleanly. Round 3 judged this non-blocking because no
+   real source (`Date.toISOString()`, or a hand-written YAML timestamp)
+   ever produces that shape, but issue #37 revisits it: since no real
+   producer emits anything but `T` or a space, any other separator is
+   evidence of a hand-edited or corrupted value, not a form worth
+   accepting on the theory that `fromisoformat` happens to parse it.
+   `_has_acceptable_separator` enforces that ahead of parsing.
 """
 
 from __future__ import annotations
@@ -78,10 +92,32 @@ import yaml
 _TIMESTAMP_KEY = "timestamp"
 _CITATIONS_KEYS = ("citations", "Citations")
 
-# The real-world range of UTC offsets (UTC-12 through UTC+14). Python's own
-# `datetime` only refuses offsets >= 24h, which is wider than any offset a
-# real timezone actually uses.
+# The real-world range of UTC offsets: UTC-12 (west) through UTC+14
+# (Kiribati's Line Islands, east) -- NOT symmetric. Python's own `datetime`
+# only refuses offsets >= 24h, which is wider than any offset a real
+# timezone actually uses in either direction.
+_MIN_UTC_OFFSET = _dt.timedelta(hours=-12)
 _MAX_UTC_OFFSET = _dt.timedelta(hours=14)
+
+# The only date/time separators a real producer emits: `T` (every ISO 8601
+# string `Date.toISOString()` produces) or a plain space (YAML convention
+# for hand-written timestamps). `datetime.fromisoformat` itself accepts any
+# single character here, which would let a corrupted or hand-mangled value
+# like `2025-05-01x09:30:00+08:00` parse as if it were legitimate evidence.
+_VALID_DATETIME_SEPARATORS = ("T", " ")
+
+
+def _has_acceptable_separator(value: str) -> bool:
+    """True unless ``value`` uses a date/time separator other than `T`/space.
+
+    ISO 8601 dates are a fixed-width ``YYYY-MM-DD`` (10 characters), so the
+    separator -- when a time-of-day is present at all -- sits at index 10.
+    Values with no character there (date-only, or too short to carry a
+    separator) are left for ``datetime.fromisoformat``/the sufficiency check
+    to reject on their own merits; this function only ever narrows, never
+    widens, what already gets through.
+    """
+    return len(value) <= 10 or value[10] in _VALID_DATETIME_SEPARATORS
 
 
 def _offset_aware_datetime_evidence(value: str) -> _dt.datetime | None:
@@ -90,12 +126,16 @@ def _offset_aware_datetime_evidence(value: str) -> _dt.datetime | None:
     Returns the parsed timezone-aware ``datetime`` when ``value`` carries
     an explicit time-of-day *and* a real UTC offset (``Z``, ``+HH:MM``,
     ``+HHMM``, or ``+HH`` -- all legal ISO 8601 §4.2.5 forms) within the
-    real-world UTC-12..UTC+14 range. Returns ``None`` for anything else:
-    date-only strings, naive time-of-day strings with no offset, and
-    syntactically-shaped-but-nonexistent values (month 99, offset +99:00,
-    February 30th) -- ``datetime.fromisoformat`` already rejects those with
-    a proper calendar-aware ``ValueError``.
+    real-world UTC-12..UTC+14 range, separated from the date by `T` or a
+    space. Returns ``None`` for anything else: date-only strings, naive
+    time-of-day strings with no offset, syntactically-shaped-but-nonexistent
+    values (month 99, offset +99:00, February 30th) --
+    ``datetime.fromisoformat`` already rejects those with a proper
+    calendar-aware ``ValueError`` -- and values that use a separator other
+    than `T`/space, which no real producer emits.
     """
+    if not _has_acceptable_separator(value):
+        return None
     try:
         parsed = _dt.datetime.fromisoformat(value)
     except (ValueError, TypeError):
@@ -108,7 +148,7 @@ def _sufficient_evidence(parsed: _dt.datetime) -> _dt.datetime | None:
     if parsed.tzinfo is None:
         return None
     offset = parsed.utcoffset()
-    if offset is None or abs(offset) > _MAX_UTC_OFFSET:
+    if offset is None or offset < _MIN_UTC_OFFSET or offset > _MAX_UTC_OFFSET:
         return None
     return parsed
 
