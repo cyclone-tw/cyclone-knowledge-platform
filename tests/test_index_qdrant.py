@@ -177,6 +177,7 @@ def test_shadow_benchmark_runs_identically_on_qdrant() -> None:
             index_provider=InMemoryVectorIndex(),
             gate=public_gate(),
             top_k=3,
+            trials=1,
         )
         against_qdrant = run_shadow_benchmark(
             members=members,
@@ -184,12 +185,13 @@ def test_shadow_benchmark_runs_identically_on_qdrant() -> None:
             index_provider=qdrant,
             gate=public_gate(),
             top_k=3,
+            trials=1,
         )
     finally:
         qdrant.wipe()
 
     assert against_qdrant["index_provider"] == "qdrant-local"
-    assert against_qdrant["summary"]["privacy_violations"] == 0
+    assert against_qdrant["summary"]["privacy_false_negatives"] == 0
     assert (
         against_qdrant["summary"]["vector_hit_rate"]
         == reference["summary"]["vector_hit_rate"]

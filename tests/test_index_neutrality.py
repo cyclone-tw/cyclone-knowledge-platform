@@ -147,6 +147,7 @@ def test_the_same_caller_runs_both_providers_unchanged() -> None:
         index_provider=InMemoryVectorIndex(),
         gate=public_gate(),
         top_k=3,
+        trials=1,
     )
     third_party = run_shadow_benchmark(
         members=members,
@@ -154,6 +155,7 @@ def test_the_same_caller_runs_both_providers_unchanged() -> None:
         index_provider=ThirdPartyListIndex(),
         gate=public_gate(),
         top_k=3,
+        trials=1,
     )
 
     assert third_party["index_provider"] == "third-party-list"

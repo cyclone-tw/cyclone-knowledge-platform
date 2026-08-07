@@ -10,17 +10,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-CORPUS_VERSION = "1"
+CORPUS_VERSION = "2"
 QUESTION_SET_VERSION = "1"
 
 
 @dataclass(frozen=True)
 class CorpusNote:
-    """One synthetic note: path, declared privacy, body."""
+    """One synthetic note: path, declared privacy, body.
+
+    ``superseded`` marks a note that a newer note has replaced (contract
+    §5.3 stale-exclusion metric). It carries no privacy meaning -- a
+    superseded note is still ``public``; it is just not the answer anymore.
+    """
 
     relative_path: str
     privacy: str
     body: str
+    superseded: bool = False
 
     @property
     def content(self) -> bytes:
@@ -58,6 +64,7 @@ CORPUS: tuple[CorpusNote, ...] = (
         "public",
         "# Platform status (superseded)\n\nSynthetic older status note: the "
         "storage rebuild is still in progress and reads are degraded.",
+        superseded=True,
     ),
     CorpusNote(
         "person-profile-vex.md",
@@ -103,6 +110,18 @@ CORPUS_BODIES: dict[str, str] = {note.relative_path: note.body for note in CORPU
 #: Paths that must never appear in any engine's output, ever.
 NON_PUBLIC_PATHS: frozenset[str] = frozenset(
     note.relative_path for note in CORPUS if note.privacy != "public"
+)
+
+#: Paths superseded by a newer note (contract §5.3 stale-exclusion metric).
+SUPERSEDED_PATHS: frozenset[str] = frozenset(
+    note.relative_path for note in CORPUS if note.superseded
+)
+
+#: Paths declared ``public`` in the corpus, independent of what any gated
+#: rebuild actually indexed. Used to measure privacy false positives: a
+#: public note the gate should have indexed but did not.
+PUBLIC_DECLARED_PATHS: frozenset[str] = frozenset(
+    note.relative_path for note in CORPUS if note.privacy == "public"
 )
 
 
@@ -191,8 +210,10 @@ __all__ = [
     "CORPUS_BODIES",
     "CORPUS_VERSION",
     "NON_PUBLIC_PATHS",
+    "PUBLIC_DECLARED_PATHS",
     "QUESTIONS",
     "QUESTION_SET_VERSION",
+    "SUPERSEDED_PATHS",
     "BenchmarkQuestion",
     "CorpusNote",
 ]

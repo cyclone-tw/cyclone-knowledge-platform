@@ -222,13 +222,42 @@ echo "==> shadow benchmark honesty"
 new_case
 replace_once \
   "benchmarks/shadow.py" \
-  '        privacy_violations += (len(raw_lexical_paths) - len(lexical_paths)) + (
+  '        privacy_false_negatives += (len(raw_lexical_paths) - len(lexical_paths)) + (
             len(raw_vector_paths) - len(vector_paths)
         )' \
-  '        privacy_violations += 0  # mutant stops counting leaks'
+  '        privacy_false_negatives += 0  # mutant stops counting leaks'
 expect_red \
-  "M9 privacy violation counter silenced" \
+  "M9 privacy false-negative counter silenced" \
   tests/test_shadow_benchmark.py::test_privacy_violations_are_counted_and_redacted
+
+new_case
+replace_once \
+  "benchmarks/shadow.py" \
+  '            "privacy_false_negatives": privacy_false_negatives,
+            "privacy_false_positives": len(fp_paths),' \
+  '            "privacy_false_negatives": privacy_false_negatives + len(fp_paths),
+            "privacy_false_positives": len(fp_paths),'
+expect_red \
+  "M9b privacy false positives merged into the zero-tolerance false-negative count" \
+  tests/test_shadow_benchmark.py::test_privacy_false_positives_do_not_inflate_false_negatives
+
+new_case
+replace_once \
+  "benchmarks/shadow.py" \
+  '    return ordered[rank - 1]' \
+  '    return sum(ordered) / len(ordered)  # mutant degrades p50/p95 to mean'
+expect_red \
+  "M9c percentile degrades to the mean instead of nearest-rank" \
+  tests/test_shadow_benchmark.py::test_percentile_is_nearest_rank_not_mean_or_interpolated
+
+new_case
+replace_once \
+  "benchmarks/shadow.py" \
+  'TOKEN_COST_METHOD = "whitespace-proxy"' \
+  'TOKEN_COST_METHOD = "model-tokenizer"  # mutant lies about the method'
+expect_red \
+  "M9d token_cost_method label lies about the whitespace-proxy computation" \
+  tests/test_shadow_benchmark.py::test_token_cost_is_whitespace_split_and_labeled_accordingly
 
 new_case
 replace_once \
