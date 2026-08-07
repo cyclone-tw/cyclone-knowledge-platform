@@ -203,14 +203,17 @@ def load_frozen_manifest(config: Config) -> PilotManifest:
             f"frozen pilot manifest {manifest_path} is not valid TOML: {exc}"
         ) from exc
 
-    unknown_top_level = sorted(set(parsed) - _ALLOWED_TOP_LEVEL_KEYS)
+    unknown_top_level = set(parsed) - _ALLOWED_TOP_LEVEL_KEYS
     if unknown_top_level:
+        # Codex round 4 on #36: a TOML *quoted key* legally carries arbitrary
+        # content ("LEAKED note body" = "x"), so key names are attacker bytes
+        # too and are deliberately not echoed -- count and allowed set only,
+        # same principle as the value diagnostics above.
         raise PilotBindingError(
-            f"{manifest_path}: top-level field(s) {unknown_top_level!r} this "
-            f"schema does not define; only {sorted(_ALLOWED_TOP_LEVEL_KEYS)!r} "
-            "are allowed -- a manifest field the code silently ignores (e.g. "
-            "a top-level `body`) is exactly the RP1 hole this refuses rather "
-            "than accepts-and-ignores"
+            f"{manifest_path}: {len(unknown_top_level)} top-level field(s) "
+            f"this schema does not define (names withheld -- a quoted TOML "
+            f"key can carry a payload); only "
+            f"{sorted(_ALLOWED_TOP_LEVEL_KEYS)!r} are allowed"
         )
 
     notes = parsed.get("note")
@@ -223,14 +226,13 @@ def load_frozen_manifest(config: Config) -> PilotManifest:
             raise PilotBindingError(
                 f"{manifest_path}: [[note]] #{index} is not a table"
             )
-        unknown = sorted(set(note) - _ALLOWED_NOTE_KEYS)
+        unknown = set(note) - _ALLOWED_NOTE_KEYS
         if unknown:
             raise PilotBindingError(
-                f"{manifest_path}: [[note]] #{index} has field(s) {unknown!r} "
-                f"this schema does not define; only {sorted(_ALLOWED_NOTE_KEYS)!r} "
-                "are allowed -- a manifest field the code silently ignores "
-                "(e.g. an extra `body`) is exactly the RP1 hole this refuses "
-                "rather than accepts-and-ignores"
+                f"{manifest_path}: [[note]] #{index} has {len(unknown)} "
+                f"field(s) this schema does not define (names withheld -- a "
+                f"quoted TOML key can carry a payload); only "
+                f"{sorted(_ALLOWED_NOTE_KEYS)!r} are allowed"
             )
         try:
             relative_path = note["relative_path"]

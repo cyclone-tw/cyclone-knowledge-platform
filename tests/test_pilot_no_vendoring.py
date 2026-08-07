@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 
 import pytest
 
@@ -221,10 +222,18 @@ def test_load_frozen_manifest_rejects_any_undeclared_note_field(
     with pytest.raises(PilotBindingError) as excinfo:
         load_frozen_manifest(config)
     message = str(excinfo.value)
-    # Match the offending key, not the boilerplate: the error text explains
-    # the rule with `body` as its example, so `match="body"` would pass for
-    # every parameter regardless of which key actually tripped the check.
-    assert repr(extra_key) in message, message
+    # Round 4: key names are withheld -- a quoted TOML key legally carries
+    # arbitrary content, so echoing the name is the same leak as echoing a
+    # value. Each parametrised key still proves the guard trips on it (that
+    # is what keeps a blocks-only-`body` implementation red), and the message
+    # must not contain the planted name.
+    # Word-boundary match, not substring: `content` legitimately appears
+    # inside `content_sha256` in the (repo-public) allowed list. A leak would
+    # echo the key as a standalone token.
+    assert not re.search(
+        rf"(?<![A-Za-z0-9_]){re.escape(extra_key)}(?![A-Za-z0-9_])", message
+    ), message
+    assert "names withheld" in message
     assert "#0" in message
 
 
@@ -269,10 +278,13 @@ def test_load_frozen_manifest_rejects_any_undeclared_top_level_field(
     with pytest.raises(PilotBindingError) as excinfo:
         load_frozen_manifest(config)
     message = str(excinfo.value)
-    # Match the offending key, not the boilerplate: the error text explains
-    # the rule with `body` as its example, so `match="body"` would pass for
-    # every parameter regardless of which key actually tripped the check.
-    assert repr(extra_key) in message, message
+    # Round 4: withheld on purpose -- a quoted TOML key carries a payload, so
+    # the name is attacker bytes. Parametrisation keeps a blocks-only-`body`
+    # implementation red; the message must not repeat the planted name.
+    assert not re.search(
+        rf"(?<![A-Za-z0-9_]){re.escape(extra_key)}(?![A-Za-z0-9_])", message
+    ), message
+    assert "names withheld" in message
 
 
 def test_bind_pilot_corpus_rejects_an_injected_manifest_outside_the_allowlist(
