@@ -208,12 +208,19 @@ def _ci_workflow_env_names() -> set[str]:
     workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
-    # Matches the name wherever it appears as a mapping key: bare, single- or
-    # double-quoted, and inside a flow mapping (`{CKP_X: "1"}`), which are all
-    # legal YAML for the same thing. Anchoring on the prefix rather than on
-    # line structure keeps a formatting choice from silently shrinking what
-    # this guard sees.
-    return set(re.findall(r"""['"{,\s](CKP_[A-Za-z0-9_]+)['"]?\s*:""", workflow))
+    return _ckp_env_names_in(workflow)
+
+
+def _ckp_env_names_in(text: str) -> set[str]:
+    """Every ``CKP_*`` mapping key in ``text``.
+
+    Matches the name wherever it appears as a mapping key: bare, single- or
+    double-quoted, and inside a flow mapping (`{CKP_X: "1"}`), which are all
+    legal YAML for the same thing. Anchoring on the prefix rather than on line
+    structure keeps a formatting choice from silently shrinking what this
+    guard sees; `test_the_scan_sees_every_legal_yaml_key_form` pins each shape.
+    """
+    return set(re.findall(r"""['"{,\s](CKP_[A-Za-z0-9_]+)['"]?\s*:""", text))
 
 
 def test_every_ci_env_name_is_a_config_key_or_explicitly_reserved() -> None:
@@ -240,6 +247,31 @@ def test_every_ci_env_name_is_a_config_key_or_explicitly_reserved() -> None:
             f"ConfigError. Register it in defaults.toml if it is a config "
             f"value, or add it to RESERVED_ENV if it is a harness switch."
         )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        '          CKP_BARE_KEY: "1"',
+        '          "CKP_DOUBLE_QUOTED": "1"',
+        "          'CKP_SINGLE_QUOTED': '1'",
+        '          CKP_lower_case_key: "1"',
+        '          { CKP_FLOW_MAPPING: "1" }',
+    ],
+    ids=["bare", "double-quoted", "single-quoted", "lowercase", "flow-mapping"],
+)
+def test_the_scan_sees_every_legal_yaml_key_form(tmp_path, line: str) -> None:
+    """Pins the shapes the scan must see, not just that it sees something.
+
+    Round 1's regex only matched bare keys at line start and both guards above
+    still passed, so the widening was real but unprotected -- reverting it
+    would have gone unnoticed. Each form here is legal YAML for the same
+    mapping key; a formatting choice must not shrink what the guard covers.
+    """
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(f"jobs:\n  test:\n    env:\n{line}\n", encoding="utf-8")
+    found = _ckp_env_names_in(workflow.read_text(encoding="utf-8"))
+    assert len(found) == 1, f"{line!r} was not seen as a CKP_* key: {found}"
 
 
 def test_no_config_key_is_also_reserved() -> None:
