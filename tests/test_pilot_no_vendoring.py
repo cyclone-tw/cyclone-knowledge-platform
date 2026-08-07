@@ -110,7 +110,6 @@ def test_format_invalid_string_values_are_refused_without_echo(
     the actual point -- never repeated in the message.
     """
     manifest_file = tmp_path / "pilot-manifest.toml"
-    values = {"relative_path": None, "content_sha256": None}
     lines = []
     for index, path in enumerate(PILOT_NOTE_PATHS):
         rp = value if (index == 0 and field == "relative_path") else path
