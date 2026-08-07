@@ -75,14 +75,35 @@ class QmdUnavailable(RuntimeError):
     """
 
 
+class QmdConfigError(ValueError):
+    """The caller built an unusable :class:`QmdBaselineConfig`.
+
+    Distinct from :class:`QmdUnavailable` on purpose: this is a *caller*
+    mistake in how the comparison was set up, raised at construction time,
+    before any subprocess ever runs -- not a runtime failure of a
+    correctly-configured comparison. Keeping the two exception types
+    separate keeps a `except QmdUnavailable` at a call site from
+    accidentally swallowing a config bug too (Codex Round 1 review).
+    """
+
+
 @dataclass(frozen=True)
 class QmdBaselineConfig:
     """Everything one shadow-benchmark run needs to call the real QMD.
 
     ``index_name`` has no default (invariant 1 above). ``corpus_paths`` has
-    no default either: an empty or omitted scope would make every result
-    fail the membership filter silently, which looks identical to "QMD
-    found nothing" -- a caller must pass the scope it actually means.
+    no default either, and additionally **must be non-empty**: an empty
+    scope is a caller configuration error, not a legitimate "compare
+    against zero documents" request -- no real scenario needs that. Left
+    unchecked, an empty ``corpus_paths`` makes every real QMD hit get
+    filtered away, and the report would read as ``qmd_compared: true,
+    qmd_hit_rate: 0.0`` -- indistinguishable from "QMD was compared and
+    performed badly," when the honest story is "nothing was ever in scope."
+    That silently biases every D1 relative threshold in the platform's
+    favor (Codex Round 1 finding: the same shape as #26's silent-zero
+    token-cost bug, a different entry point). ``__post_init__`` below fails
+    loud at construction time -- before the caller has spent any QMD
+    subprocess cost -- rather than deferring the check to the first query.
     """
 
     index_name: str
@@ -91,6 +112,19 @@ class QmdBaselineConfig:
     collection: str | None = None
     binary: str = DEFAULT_QMD_BINARY
     timeout_seconds: float = DEFAULT_QMD_TIMEOUT_SECONDS
+
+    def __post_init__(self) -> None:
+        if not self.corpus_paths:
+            raise QmdConfigError(
+                "QmdBaselineConfig.corpus_paths is empty: there is nothing "
+                "to compare QMD against. This is a caller configuration "
+                "error, not a 'QMD found nothing' result -- comparing "
+                "against zero documents would make every question read as "
+                "qmd_compared=True with a hit rate of 0.0, which looks like "
+                "QMD performed badly when in fact nothing was ever in "
+                "scope. Pass the actual corpus scope (e.g. "
+                "ckp.pilot.PILOT_NOTE_PATHS)."
+            )
 
 
 @dataclass(frozen=True)
@@ -282,6 +316,7 @@ __all__ = [
     "DEFAULT_QMD_BINARY",
     "DEFAULT_QMD_TIMEOUT_SECONDS",
     "QmdBaselineConfig",
+    "QmdConfigError",
     "QmdHit",
     "QmdQueryResult",
     "QmdUnavailable",

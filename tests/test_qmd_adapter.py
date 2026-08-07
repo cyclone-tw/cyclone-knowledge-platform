@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 from benchmarks.qmd.adapter import (
     QmdBaselineConfig,
+    QmdConfigError,
     QmdUnavailable,
     _normalize_path,
     qmd_binary_available,
@@ -45,6 +46,52 @@ def _fake_completed(
     return subprocess.CompletedProcess(
         args=["qmd"], returncode=returncode, stdout=stdout, stderr=stderr
     )
+
+
+# --- empty corpus_paths (Codex Round 1, #24 review) ---------------------
+
+
+def test_empty_corpus_paths_is_rejected_at_construction(tmp_path: Path) -> None:
+    """A caller error, not a legitimate 'compare against zero notes'.
+
+    Left unchecked, this would make every QMD hit fail the scope filter,
+    and ``benchmarks.shadow`` would report ``qmd_compared: True,
+    qmd_hit_rate: 0.0`` -- indistinguishable from "QMD was compared and
+    scored badly," when nothing was ever in scope.
+    """
+    with pytest.raises(QmdConfigError, match="empty"):
+        QmdBaselineConfig(
+            index_name="cyclone-wiki",
+            wiki_root=tmp_path,
+            corpus_paths=frozenset(),
+        )
+
+
+def test_empty_corpus_paths_raises_before_any_subprocess_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Timing is part of the contract: fail at construction, not at query
+    time -- before the caller has spent any real QMD subprocess cost.
+    """
+
+    def fail_if_invoked(*args, **kwargs):
+        raise AssertionError(
+            "qmd must never be invoked for a config that fails validation"
+        )
+
+    monkeypatch.setattr("shutil.which", lambda binary: "/usr/local/bin/qmd")
+    monkeypatch.setattr("subprocess.run", fail_if_invoked)
+
+    with pytest.raises(QmdConfigError):
+        QmdBaselineConfig(
+            index_name="cyclone-wiki", wiki_root=tmp_path, corpus_paths=frozenset()
+        )
+    # If construction had instead succeeded and only ``run_qmd_query``
+    # checked, we would need to call it here to prove the check still
+    # fires; the ``pytest.raises`` above already proves it never gets that
+    # far, and ``fail_if_invoked`` above is a second line of defense in
+    # case some future refactor moves the check past construction without
+    # this test noticing via the ``raises`` alone.
 
 
 # --- path normalization ------------------------------------------------

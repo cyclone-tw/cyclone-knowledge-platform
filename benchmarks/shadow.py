@@ -118,6 +118,29 @@ QMD_STALE_EXCLUSION_NOTE = (
     "D2, not a bug in this report."
 )
 
+#: Codex Round 1 (#24 review) found a second entry point for the same shape
+#: this whole issue exists to close: a non-empty ``corpus_paths`` that
+#: happens to share *no* path with anything QMD actually returns (every
+#: path mistyped, or pointed at files the named index does not have)
+#: produces the identical "qmd_compared: true, qmd_hit_rate: 0.0" report an
+#: empty scope would have -- indistinguishable from "QMD was compared and
+#: performed badly" unless flagged separately. ``qmd_scope_overlap`` is the
+#: flag: ``True`` once any raw QMD hit anywhere in the run fell inside the
+#: configured scope, ``False`` if QMD returned real hits but never once one
+#: that matched the scope (a config smell, not a quality signal), ``None``
+#: when QMD was never compared or never returned a raw hit at all (in which
+#: case a scope mismatch cannot be told apart from a genuine "nothing
+#: found").
+QMD_SCOPE_OVERLAP_NOTE = (
+    "true: at least one raw QMD hit somewhere in this run fell inside "
+    "corpus_paths. false: QMD returned real hits but none of them, in the "
+    "whole run, ever matched corpus_paths -- read this as a likely scope or "
+    "path configuration error, not as a retrieval-quality result (Codex "
+    "Round 1 finding). null: QMD was not compared, or never returned any "
+    "raw hit at all, so a scope mismatch cannot be distinguished from a "
+    "genuine 'nothing found' answer."
+)
+
 #: Default per-question, per-engine repeat count for the latency sample.
 DEFAULT_LATENCY_TRIALS = 5
 
@@ -248,6 +271,10 @@ def run_shadow_benchmark(
     qmd_scored = 0
     qmd_tokens_total = 0
     qmd_trial_samples: list[float] = []
+    #: Codex Round 1 diagnostic (see ``QMD_SCOPE_OVERLAP_NOTE``): counts
+    #: across the whole run, independent of any single question's hit/miss.
+    qmd_questions_with_raw_hits = 0
+    qmd_questions_with_scoped_hits = 0
 
     for question in QUESTIONS:
         started = time.perf_counter()
@@ -301,6 +328,13 @@ def run_shadow_benchmark(
                 if question.expected_paths:
                     qmd_scored += 1
                     qmd_hits += 1 if qmd_hit else 0
+                # Codex Round 1 diagnostic: track whether QMD ever returned
+                # anything at all, separately from whether any of it landed
+                # inside the configured scope (``QMD_SCOPE_OVERLAP_NOTE``).
+                if qmd_result.raw_paths:
+                    qmd_questions_with_raw_hits += 1
+                if qmd_result.paths:
+                    qmd_questions_with_scoped_hits += 1
                 # D1's token-cost threshold needs this number; reads real
                 # bytes transiently and discards them (see the module-level
                 # note above ``QMD_STALE_EXCLUSION_NOTE``).
@@ -403,6 +437,19 @@ def run_shadow_benchmark(
         qmd_scored = 0
         qmd_tokens_total = 0
         qmd_trial_samples = []
+        qmd_questions_with_raw_hits = 0
+        qmd_questions_with_scoped_hits = 0
+
+    # Codex Round 1 diagnostic, computed once the run (or its cleanup
+    # above) has settled: see ``QMD_SCOPE_OVERLAP_NOTE`` for the three-way
+    # meaning. Deliberately *not* folded into ``qmd_hit_rate`` -- a scope
+    # mismatch is a setup problem, not a retrieval-quality number, and the
+    # two must stay distinguishable the same way privacy false positives
+    # and false negatives are kept apart elsewhere in this report.
+    if not qmd_compared or qmd_questions_with_raw_hits == 0:
+        qmd_scope_overlap = None
+    else:
+        qmd_scope_overlap = qmd_questions_with_scoped_hits > 0
 
     return {
         "schema": REPORT_SCHEMA,
@@ -423,6 +470,8 @@ def run_shadow_benchmark(
         # of an absent or zero-valued field, so #30's gate cannot mistake
         # "not applicable" for "measured and zero".
         "qmd_stale_exclusion_note": QMD_STALE_EXCLUSION_NOTE,
+        "qmd_scope_overlap": qmd_scope_overlap,
+        "qmd_scope_overlap_note": QMD_SCOPE_OVERLAP_NOTE,
         # Read from the descriptor, never hardcoded: a semantic provider
         # must not be reported as a hash baseline, or vice versa (R1 review).
         "semantic": stack.embedding.descriptor.semantic,

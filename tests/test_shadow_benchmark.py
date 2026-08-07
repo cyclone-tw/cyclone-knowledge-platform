@@ -401,7 +401,11 @@ def _qmd_config(**overrides) -> QmdBaselineConfig:
     defaults = dict(
         index_name="cyclone-wiki",
         wiki_root=UNUSED_ROOT,
-        corpus_paths=frozenset(),
+        # A non-empty placeholder: every call site below overrides this
+        # explicitly. An empty default here would itself be the exact
+        # config-time footgun issue #24 Round 2 exists to reject (Codex
+        # Round 1 finding) -- ``QmdBaselineConfig`` no longer accepts it.
+        corpus_paths=frozenset({"placeholder-unused.md"}),
     )
     defaults.update(overrides)
     return QmdBaselineConfig(**defaults)
@@ -421,6 +425,9 @@ def test_qmd_not_compared_by_default() -> None:
     # D2 known coverage gap: an explicit note, always present, never an
     # absent or zero-valued numeric field a gate could misread.
     assert "superseded" in report["qmd_stale_exclusion_note"]
+    # Codex Round 1: no comparison happened, so scope-overlap is also
+    # unknown -- never False (which would imply a comparison did happen).
+    assert report["qmd_scope_overlap"] is None
 
 
 def test_qmd_baseline_populates_the_report_when_configured(
@@ -493,6 +500,7 @@ def test_qmd_failure_mid_run_discards_the_whole_dimension(
     # behind for #30 to gate against.
     assert report["summary"]["qmd_token_cost_total"] is None
     assert report["latency_ms"]["qmd"] is None
+    assert report["qmd_scope_overlap"] is None
     for question in report["questions"]:
         assert question["qmd"] is None
     # The failure must not have quietly stopped the run early: every other
@@ -555,6 +563,58 @@ def test_qmd_scoping_excludes_hits_outside_the_configured_corpus(
     for question in scored_with_expectations:
         assert question["qmd"]["hit"] is False
     assert report["summary"]["qmd_hit_rate"] == 0.0
+    # Codex Round 1: this run's shape -- QMD returned real hits every
+    # question, none ever landed in scope -- is exactly the "looks like a
+    # bad score but is actually a config error" signature. ``False`` here
+    # is the whole point of the diagnostic: it must not silently read the
+    # same as a genuine 0.0 hit rate.
+    assert report["qmd_scope_overlap"] is False
+
+
+def test_qmd_scope_overlap_is_true_once_any_raw_hit_lands_in_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A correctly-scoped, ordinary comparison must read as ``True``.
+
+    Guards the other direction of the Round 1 diagnostic: it must not fire
+    (or worse, force ``False``) on a run that is behaving normally.
+    """
+
+    def fake_run_qmd_query(query, *, config, top_k):
+        return QmdQueryResult(
+            raw_paths=("Core/note.md",), paths=("Core/note.md",), hits=()
+        )
+
+    monkeypatch.setattr("benchmarks.shadow.run_qmd_query", fake_run_qmd_query)
+
+    config = _qmd_config(corpus_paths=frozenset({"Core/note.md"}))
+    report = _run(qmd_config=config)
+
+    assert report["qmd_compared"] is True
+    assert report["qmd_scope_overlap"] is True
+
+
+def test_qmd_scope_overlap_is_none_when_qmd_never_returns_any_raw_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely empty QMD answer is not a scope-mismatch signal.
+
+    When QMD itself never returns anything (``raw_paths`` always empty),
+    there is nothing to tell a scope mismatch apart from an honest "QMD
+    found nothing for any of these queries" -- the diagnostic must stay
+    ``None`` rather than guessing ``False``.
+    """
+
+    def fake_run_qmd_query(query, *, config, top_k):
+        return QmdQueryResult(raw_paths=(), paths=(), hits=())
+
+    monkeypatch.setattr("benchmarks.shadow.run_qmd_query", fake_run_qmd_query)
+
+    config = _qmd_config(corpus_paths=frozenset({"Core/note.md"}))
+    report = _run(qmd_config=config)
+
+    assert report["qmd_compared"] is True
+    assert report["qmd_scope_overlap"] is None
 
 
 def test_qmd_token_cost_total_matches_the_whitespace_proxy_computation(
