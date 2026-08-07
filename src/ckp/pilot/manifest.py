@@ -221,17 +221,36 @@ def load_frozen_manifest(config: Config) -> PilotManifest:
                 "rather than accepts-and-ignores"
             )
         try:
-            entries.append(
-                PilotManifestEntry(
-                    relative_path=note["relative_path"],
-                    content_sha256=note["content_sha256"],
-                )
-            )
+            relative_path = note["relative_path"]
+            content_sha256 = note["content_sha256"]
         except (KeyError, TypeError) as exc:
             raise PilotBindingError(
                 f"{manifest_path}: [[note]] #{index} needs relative_path and "
                 "content_sha256"
             ) from exc
+        # Codex round 1 on #36: key checking alone left a third layer open --
+        # TOML values can be inline tables, so `content_sha256 = { body =
+        # "..." }` passed the key allowlist while carrying a payload. The
+        # value must be a plain string; anything else is refused *without
+        # echoing the value* (a manifest is outside the Markdown privacy
+        # scanner's reach, so an error message is a leak path too).
+        for field_name, value in (
+            ("relative_path", relative_path),
+            ("content_sha256", content_sha256),
+        ):
+            if not isinstance(value, str):
+                raise PilotBindingError(
+                    f"{manifest_path}: [[note]] #{index} field {field_name!r} "
+                    f"must be a string, got {type(value).__name__} -- a "
+                    "non-string value is a place to smuggle content, and its "
+                    "contents are deliberately not repeated here"
+                )
+        entries.append(
+            PilotManifestEntry(
+                relative_path=relative_path,
+                content_sha256=content_sha256,
+            )
+        )
     entries = tuple(entries)
 
     manifest = PilotManifest(entries=entries)

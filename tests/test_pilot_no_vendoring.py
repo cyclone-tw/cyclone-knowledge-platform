@@ -88,6 +88,44 @@ def test_load_frozen_manifest_rejects_paths_that_drift_from_the_allowlist(
 
 
 @pytest.mark.parametrize(
+    "value_toml,type_name",
+    [
+        ('{ body = "leaked note body" }', "dict"),
+        ('["leaked", "note", "body"]', "list"),
+        ("42", "int"),
+    ],
+    ids=["inline-table", "array", "int"],
+)
+def test_load_frozen_manifest_rejects_non_string_field_values(
+    tmp_path, value_toml: str, type_name: str
+) -> None:
+    """The third layer of the same hole (Codex round 1 on #36).
+
+    #33 guarded the note-level keys, this ticket guarded the top-level keys,
+    and a TOML *value* was still a place to smuggle content: an inline table
+    under an allowed key passed both allowlists. Values must be plain
+    strings, and the refusal must not echo the value -- the manifest sits
+    outside the Markdown privacy scanner, so an error message that repeats
+    the payload is itself a leak path.
+    """
+    manifest_file = tmp_path / "pilot-manifest.toml"
+    lines = "\n".join(
+        f'[[note]]\nrelative_path = "{path}"\ncontent_sha256 = '
+        + (value_toml if index == 0 else f'"{"0" * 64}"')
+        for index, path in enumerate(PILOT_NOTE_PATHS)
+    )
+    manifest_file.write_text(lines + "\n", encoding="utf-8")
+
+    config = load_config(env={"CKP_PILOT_MANIFEST_PATH": str(manifest_file)})
+    with pytest.raises(PilotBindingError) as excinfo:
+        load_frozen_manifest(config)
+    message = str(excinfo.value)
+    assert "content_sha256" in message
+    assert type_name in message
+    assert "leaked" not in message  # the value itself must never be echoed
+
+
+@pytest.mark.parametrize(
     "extra_key,extra_value",
     [
         ("body", '"leaked content"'),
