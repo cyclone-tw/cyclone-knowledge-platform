@@ -25,21 +25,23 @@ _CHUNK_SIZE = 1 << 20
 
 @dataclass(frozen=True)
 class SemanticModelAssets:
-    """Local, digest-verified paths to every file the provider loads."""
+    """Digest-verified *content*, in memory -- not paths.
 
-    model_path: Path
-    tokenizer_path: Path
+    ``ckp.semantic.provider`` loads directly from ``model_bytes`` /
+    ``tokenizer_json`` rather than re-opening a path after verification.
+    Handing back a path here would leave a TOCTOU window between "this file
+    hashed correctly" and "the loader opened this file": on a shared host,
+    something else could in principle replace the file on disk in between
+    (R1 review, non-blocking). Returning the exact bytes that were hashed
+    closes that window structurally -- there is no second read for a
+    swapped file to land in.
+    """
+
+    model_bytes: bytes
+    tokenizer_json: str
 
 
-def _digest(path: Path) -> str:
-    hasher = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(_CHUNK_SIZE), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
-
-
-def _verify_file(model_dir: Path, spec: SemanticAssetFile) -> Path:
+def _read_and_verify_file(model_dir: Path, spec: SemanticAssetFile) -> bytes:
     path = model_dir / spec.relative_path
     if not path.is_file():
         raise SemanticRefusal(SemanticErrorCode.ASSETS_MISSING)
@@ -49,13 +51,23 @@ def _verify_file(model_dir: Path, spec: SemanticAssetFile) -> Path:
         # digest mismatch is still the right call -- both mean "this is not
         # the pinned file".
         raise SemanticRefusal(SemanticErrorCode.ASSET_DIGEST_MISMATCH)
-    if _digest(path) != spec.sha256:
+
+    hasher = hashlib.sha256()
+    chunks: list[bytes] = []
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(_CHUNK_SIZE), b""):
+            hasher.update(chunk)
+            chunks.append(chunk)
+
+    if hasher.hexdigest() != spec.sha256:
         raise SemanticRefusal(SemanticErrorCode.ASSET_DIGEST_MISMATCH)
-    return path
+    # Only reached once the digest of exactly these bytes has matched --
+    # nothing downstream re-reads the path.
+    return b"".join(chunks)
 
 
 def resolve_semantic_assets(*, model_dir: Path) -> SemanticModelAssets:
-    """Verify every pinned file under ``model_dir`` and return their paths.
+    """Verify every pinned file under ``model_dir`` and return its content.
 
     Fails closed and by name: a missing directory, a missing file, a
     truncated download, or a bit-flipped one all raise a coded
@@ -66,12 +78,12 @@ def resolve_semantic_assets(*, model_dir: Path) -> SemanticModelAssets:
         raise SemanticRefusal(SemanticErrorCode.ASSET_DIR_INVALID)
 
     verified = {
-        spec.relative_path: _verify_file(model_dir, spec)
+        spec.relative_path: _read_and_verify_file(model_dir, spec)
         for spec in SEMANTIC_MODEL_FILES
     }
     return SemanticModelAssets(
-        model_path=verified["onnx/model_quantized.onnx"],
-        tokenizer_path=verified["tokenizer.json"],
+        model_bytes=verified["onnx/model_quantized.onnx"],
+        tokenizer_json=verified["tokenizer.json"].decode("utf-8"),
     )
 
 

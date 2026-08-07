@@ -152,6 +152,16 @@ def test_only_the_c5_index_package_depends_on_c4() -> None:
     same relationship C5's ``ckp.index`` already has. Nothing in this
     package (``PACKAGE`` above) changed to make that possible, and this
     allowlist is the only place that had to move.
+
+    Known scope limit (R1 review, non-blocking): ``path.parents`` allows the
+    entire ``src/ckp/semantic`` *subtree*, recursively -- the same shape as
+    the pre-existing ``src/ckp/index`` allowance above it. Today's package
+    is flat (no submodules), so this is not yet exploitable, but a future
+    nested module under either package would inherit the exemption without
+    this test noticing. Tightening it to a fixed, enumerated file list (like
+    ``test_c4_expected_embedding_modules_are_present`` already does for C4
+    itself) would close that gap; not done here to keep this PR's diff
+    scoped to issue #25.
     """
     for path in sorted((REPO_ROOT / "src/ckp").rglob("*.py")):
         if PACKAGE in path.parents:

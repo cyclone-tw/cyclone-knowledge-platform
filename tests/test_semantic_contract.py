@@ -20,7 +20,7 @@ import pytest
 
 from ckp.semantic.assets import resolve_semantic_assets
 from ckp.semantic.errors import SemanticErrorCode, SemanticRefusal
-from ckp.semantic.manifest import SEMANTIC_MODEL_FILES
+from ckp.semantic.manifest import SEMANTIC_MODEL_DIMENSION, SEMANTIC_MODEL_FILES
 from conftest import REPO_ROOT
 
 PACKAGE = REPO_ROOT / "src/ckp/semantic"
@@ -53,7 +53,11 @@ FORBIDDEN_TOKENS = (
 
 
 def _module_paths() -> list[Path]:
-    return sorted(PACKAGE.glob("*.py"))
+    # rglob, not glob: R1 review flagged that a one-level-deep scan would
+    # miss a future submodule under this package entirely. The package is
+    # flat today, so this is currently equivalent to glob("*.py") -- the
+    # point is that it stays correct if that ever changes.
+    return sorted(PACKAGE.rglob("*.py"))
 
 
 def test_semantic_expected_modules_are_present() -> None:
@@ -74,6 +78,17 @@ def test_the_package_stays_inside_the_offline_boundary() -> None:
     ``test_the_package_imports_nothing_that_could_reach_a_network_or_a_secret``
     and C5's index equivalent are: a network path cannot be added to this
     package without this test going red first.
+
+    R1 review flagged that a one-level-deep scan would miss a future
+    submodule under this package entirely; ``_module_paths()`` uses
+    ``rglob`` for that reason, so this check covers any nested file, not
+    just the current flat layout. What remains a known, accepted scope
+    limit is that the check itself is a *substring* scan over each file's
+    text -- not an AST import allowlist like C4's own contract test -- so
+    it would not catch, say, a network call built up from string
+    concatenation rather than a literal token. That is the same tradeoff
+    C5's equivalent test already makes; an AST-based rewrite is a larger
+    change than this PR's scope.
     """
     for path in _module_paths():
         source = path.read_text(encoding="utf-8").lower()
@@ -287,3 +302,187 @@ def test_stack_validates_itself_rather_than_trusting_its_builder() -> None:
         reranker_revision=reranker_revision,
     )
     assert stack.embedding is embedding
+
+
+# --- R1 review: provider_version must fingerprint everything that can
+# --- change the output vector (weight digest, runtime package versions,
+# --- implementation version), not a truncated model-revision hash. These
+# --- run without the pinned weights -- ``_compute_fingerprinted_provider_version``
+# --- only touches the manifest constants and whatever ``runtime_versions``
+# --- tuple it is given.
+
+
+def test_provider_version_is_a_full_64_char_digest_not_a_truncated_one() -> None:
+    from ckp.semantic.provider import _compute_fingerprinted_provider_version
+
+    version = _compute_fingerprinted_provider_version(
+        runtime_versions=("onnxruntime==1.28.0", "tokenizers==0.23.1", "numpy==2.5.1")
+    )
+    assert len(version) == 64
+    int(version, 16)  # raises ValueError if it is not hex
+
+
+def test_provider_version_changes_when_a_runtime_package_version_changes() -> None:
+    """R1 review finding 2: ``onnxruntime>=1.18,<2`` etc. are wide ranges in
+    ``pyproject.toml``; two different resolved installs must not collapse
+    onto the same ``provider_version``, or a stale index could be reused
+    across an environment change nothing here would ever detect."""
+    from ckp.semantic.provider import _compute_fingerprinted_provider_version
+
+    baseline = ("onnxruntime==1.28.0", "tokenizers==0.23.1", "numpy==2.5.1")
+    for index in range(len(baseline)):
+        changed = list(baseline)
+        changed[index] = changed[index].rsplit("==", 1)[0] + "==999.0.0"
+        version_baseline = _compute_fingerprinted_provider_version(
+            runtime_versions=baseline
+        )
+        version_changed = _compute_fingerprinted_provider_version(
+            runtime_versions=tuple(changed)
+        )
+        assert version_baseline != version_changed, baseline[index]
+
+
+def test_provider_version_changes_when_a_pinned_asset_digest_changes() -> None:
+    """Same reasoning, for the model weights themselves: two different
+    weight files must never fingerprint the same."""
+    from ckp.semantic.manifest import SemanticAssetFile
+    from ckp.semantic.provider import _compute_fingerprinted_provider_version
+
+    runtime_versions = ("onnxruntime==1.28.0", "tokenizers==0.23.1", "numpy==2.5.1")
+    original = tuple(SEMANTIC_MODEL_FILES)
+    tampered = (
+        SemanticAssetFile(
+            relative_path=original[0].relative_path,
+            sha256="0" * 64,
+            size_bytes=original[0].size_bytes,
+        ),
+        *original[1:],
+    )
+    version_original = _compute_fingerprinted_provider_version(
+        runtime_versions=runtime_versions, asset_files=original
+    )
+    version_tampered = _compute_fingerprinted_provider_version(
+        runtime_versions=runtime_versions, asset_files=tampered
+    )
+    assert version_original != version_tampered
+
+
+def test_provider_version_does_not_collide_on_a_shared_digest_prefix() -> None:
+    """R1 review finding 2, the precise failure mode: the pre-review
+    implementation used ``MODEL_REVISION[:16]`` -- the first 16 characters
+    of a commit hash. Two pinned weight files whose full sha256 digests
+    happen to share the same first 16 hex characters (entirely plausible;
+    16 hex chars is only 64 bits) but differ afterward must still produce
+    *different* fingerprints. A fingerprint built from a truncated digest
+    would collapse these two onto the same ``provider_version`` -- a stale
+    index silently reused for genuinely different weights."""
+    from ckp.semantic.manifest import SemanticAssetFile
+    from ckp.semantic.provider import _compute_fingerprinted_provider_version
+
+    runtime_versions = ("onnxruntime==1.28.0", "tokenizers==0.23.1", "numpy==2.5.1")
+    shared_prefix = "abcdabcdabcdabcd"  # 16 hex chars
+    files_a = (
+        SemanticAssetFile(
+            relative_path="onnx/model_quantized.onnx",
+            sha256=shared_prefix + "1" * 48,
+            size_bytes=1,
+        ),
+    )
+    files_b = (
+        SemanticAssetFile(
+            relative_path="onnx/model_quantized.onnx",
+            sha256=shared_prefix + "2" * 48,
+            size_bytes=1,
+        ),
+    )
+    version_a = _compute_fingerprinted_provider_version(
+        runtime_versions=runtime_versions, asset_files=files_a
+    )
+    version_b = _compute_fingerprinted_provider_version(
+        runtime_versions=runtime_versions, asset_files=files_b
+    )
+    assert version_a != version_b
+
+
+def test_provider_version_is_stable_for_the_same_inputs() -> None:
+    from ckp.semantic.provider import _compute_fingerprinted_provider_version
+
+    runtime_versions = ("onnxruntime==1.28.0", "tokenizers==0.23.1", "numpy==2.5.1")
+    first = _compute_fingerprinted_provider_version(runtime_versions=runtime_versions)
+    second = _compute_fingerprinted_provider_version(runtime_versions=runtime_versions)
+    assert first == second
+
+
+def test_installed_runtime_versions_reads_resolved_versions_not_a_range_string() -> (
+    None
+):
+    """R1 review finding 2, checked mechanically: the fingerprint input must
+    come from ``importlib.metadata`` (what is actually installed), not from
+    re-parsing ``pyproject.toml``'s ``>=``/``<`` range string."""
+    source = (PACKAGE / "provider.py").read_text(encoding="utf-8")
+    assert "importlib" in source
+    assert "metadata.version(" in source
+
+
+def test_deterministic_claim_is_scoped_to_the_provider_revision_in_the_docstring() -> (
+    None
+):
+    """R1 review finding 1: single-threaded ONNX execution proves
+    same-host, same-process-family reproducibility -- it does not prove
+    bit-identical output across different CPU microarchitectures or
+    ``onnxruntime`` builds. The module docstring must say so explicitly
+    rather than imply an unqualified cross-host guarantee; this pins the
+    words that say so instead of letting a rewrite quietly drop them."""
+    import ckp.semantic.provider as provider_module
+
+    docstring = provider_module.__doc__ or ""
+    assert "same provider revision" in docstring
+    assert "not" in docstring and "bit-identical" in docstring
+    assert "CPU" in docstring
+
+
+# --- R1 review, round 2: the pure fingerprint function was well tested, but
+# --- nothing weight-free exercised whether ``__init__`` actually *wires*
+# --- ``_installed_runtime_versions()`` into it, rather than a mutant
+# --- swapping in ``()`` at the call site. ``_build_descriptor`` isolates
+# --- that wiring from session/tokenizer loading (see its docstring), so it
+# --- is checkable here without the pinned weights on disk -- building a
+# --- ``ProviderDescriptor`` needs no model bytes. The complementary
+# --- weight-gated check that ``__init__`` actually *calls*
+# --- ``_build_descriptor`` with the real installed versions lives in
+# --- ``tests/test_semantic_embedding_provider.py``
+# --- (``test_descriptor_provider_version_matches_the_installed_runtime_fingerprint``).
+
+
+def test_build_descriptor_feeds_the_given_runtime_versions_into_the_fingerprint() -> (
+    None
+):
+    from ckp.semantic.provider import (
+        _build_descriptor,
+        _compute_fingerprinted_provider_version,
+    )
+
+    runtime_versions = ("onnxruntime==1.28.0", "tokenizers==0.23.1", "numpy==2.5.1")
+    descriptor = _build_descriptor(runtime_versions=runtime_versions)
+    expected = _compute_fingerprinted_provider_version(
+        runtime_versions=runtime_versions
+    )
+    assert descriptor.provider_version == expected
+
+    # The mutation this test exists to catch: swapping in an empty tuple
+    # (Codex R1 Finding 2's exact shape) must not produce the same
+    # fingerprint as the real installed versions.
+    empty_version = _build_descriptor(runtime_versions=()).provider_version
+    assert empty_version != descriptor.provider_version
+
+
+def test_build_descriptor_is_otherwise_honest() -> None:
+    from ckp.semantic.provider import SEMANTIC_EMBEDDING_ID, _build_descriptor
+
+    descriptor = _build_descriptor(runtime_versions=("onnxruntime==1.28.0",))
+    assert descriptor.provider_id == SEMANTIC_EMBEDDING_ID
+    assert descriptor.dimension == SEMANTIC_MODEL_DIMENSION
+    assert descriptor.normalized is True
+    assert descriptor.deterministic is True
+    assert descriptor.requires_network is False
+    assert descriptor.semantic is True

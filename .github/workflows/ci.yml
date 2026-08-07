@@ -55,10 +55,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.cache/ckp-semantic-model
-          # The manifest's pinned commit is the whole cache key: bumping it
-          # in src/ckp/semantic/manifest.py (a model swap or revision bump)
-          # naturally invalidates this cache instead of silently reusing
-          # stale weights, without hashing the manifest file itself.
+          # The manifest's pinned commit, copied by hand -- not computed from
+          # src/ckp/semantic/manifest.py -- so a model swap or revision bump
+          # there requires updating this literal too, or the cache simply
+          # misses (R1 review, accepted non-blocking: the fetch step below
+          # always re-verifies every file's sha256 against the manifest and
+          # fails loudly on a mismatch, so a forgotten key bump can only
+          # cost a cache miss and a ~5s re-download -- never a stale or
+          # wrong model silently passing).
           key: ckp-semantic-model-75c43b069aac4d136ba6bc1122f995fedcfd2781
 
       - name: Fetch and verify the pinned semantic model (build-time only)
@@ -108,6 +112,12 @@ jobs:
         if: matrix.python-version == '3.14'
         env:
           PYTHONDONTWRITEBYTECODE: "1"
+          # Without these two, the weight-gated __init__-wiring mutation
+          # (R1 review round 2) would silently skip in CI instead of
+          # actually being checked -- CKP_REQUIRE_SEMANTIC=1 turns a
+          # missing/broken cache into a hard failure of this step instead.
+          CKP_REQUIRE_SEMANTIC: "1"
+          CKP_SEMANTIC_MODEL_DIR: ${{ github.workspace }}/.cache/ckp-semantic-model
         run: bash scripts/test-c25-semantic-mutations.sh
 
   container:

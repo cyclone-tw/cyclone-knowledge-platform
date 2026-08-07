@@ -42,7 +42,7 @@ from ckp.semantic.manifest import (
     SemanticAssetFile,
 )
 from ckp.semantic.provider import (
-    PROVIDER_VERSION,
+    PROVIDER_IMPLEMENTATION_VERSION,
     SEMANTIC_EMBEDDING_ID,
     SemanticEmbeddingProvider,
 )
@@ -50,7 +50,7 @@ from ckp.semantic.provider import (
 __all__ = [
     "MODEL_REPO_ID",
     "MODEL_REVISION",
-    "PROVIDER_VERSION",
+    "PROVIDER_IMPLEMENTATION_VERSION",
     "SEMANTIC_ERROR_PREFIX",
     "SEMANTIC_EMBEDDING_ID",
     "SEMANTIC_MODEL_DIMENSION",

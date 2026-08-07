@@ -3,14 +3,22 @@
 # isolated TMPDIR copy; the issue worktree and any user checkout are never
 # edited or cleaned.
 #
-# Deliberately scoped to tests/test_semantic_contract.py only -- the
-# weight-free guards (base-dependency leaks, the offline import fence, the
-# digest-verification boundary, the stack's self-validation). The
-# weight-gated behavior tests in tests/test_semantic_embedding_provider.py
-# need the pinned model cache and are exercised by the normal ``pytest``
-# step with CKP_REQUIRE_SEMANTIC=1 (mirroring how the C5 Qdrant integration
-# tests are excluded from scripts/test-c5-mutations.sh), so this script runs
-# the same on a laptop with no model cache and no network as it does in CI.
+# Mostly scoped to tests/test_semantic_contract.py -- the weight-free
+# guards (base-dependency leaks, the offline import fence, the
+# digest-verification boundary, the stack's self-validation, the
+# provider-version fingerprint's own logic). Those run the same on a laptop
+# with no model cache and no network as they do in CI.
+#
+# One mutation near the bottom (R1 review round 2: Codex Finding 2 was still
+# alive at the __init__ wiring layer even after the fingerprint function
+# itself was fixed and fully unit tested) targets provider.py's call site
+# and can only be proven red against tests/test_semantic_embedding_provider.py,
+# which needs the pinned model cache. Locally without a cache it is skipped
+# with a visible message and the script still exits 0; with
+# CKP_REQUIRE_SEMANTIC=1 (set in CI, mirroring CKP_REQUIRE_QDRANT for the C5
+# integration tests) a missing cache is a hard failure instead -- so this
+# mutation cannot silently stop being checked in CI the way an unconditional
+# skip would let it.
 set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
@@ -178,9 +186,9 @@ echo "==> asset digest verification cannot be bypassed"
 new_case
 replace_once \
   "src/ckp/semantic/assets.py" \
-  '    if _digest(path) != spec.sha256:
+  '    if hasher.hexdigest() != spec.sha256:
         raise SemanticRefusal(SemanticErrorCode.ASSET_DIGEST_MISMATCH)' \
-  '    if False and _digest(path) != spec.sha256:
+  '    if False and hasher.hexdigest() != spec.sha256:
         raise SemanticRefusal(SemanticErrorCode.ASSET_DIGEST_MISMATCH)'
 expect_red \
   "content digest check removed from asset resolution" \
@@ -196,6 +204,31 @@ replace_once \
 expect_red \
   "missing-file check removed: a raw FileNotFoundError escapes instead of a coded refusal" \
   tests/test_semantic_contract.py::test_missing_asset_file_refuses_with_a_coded_error
+
+echo "==> the provider revision fingerprints everything that can change output (R1 review)"
+new_case
+replace_once \
+  "src/ckp/semantic/provider.py" \
+  '    for version in runtime_versions:
+        parts.append(version.encode("utf-8"))' \
+  '    for version in ():  # mutant drops runtime package versions from the fingerprint
+        parts.append(version.encode("utf-8"))'
+expect_red \
+  "installed runtime package versions dropped from the provider-version fingerprint" \
+  tests/test_semantic_contract.py::test_provider_version_changes_when_a_runtime_package_version_changes
+
+new_case
+replace_once \
+  "src/ckp/semantic/provider.py" \
+  '    for spec in asset_files:
+        parts.append(spec.relative_path.encode("utf-8"))
+        parts.append(spec.sha256.encode("ascii"))' \
+  '    for spec in asset_files:
+        parts.append(spec.relative_path.encode("utf-8"))
+        parts.append(spec.sha256[:16].encode("ascii"))  # mutant reverts to a truncated digest'
+expect_red \
+  "provider-version fingerprint reverted to a truncated asset digest" \
+  tests/test_semantic_contract.py::test_provider_version_does_not_collide_on_a_shared_digest_prefix
 
 echo "==> the semantic stack validates itself rather than trusting its builder"
 new_case
@@ -215,6 +248,40 @@ replace_once \
 expect_red \
   "a semantic stack can carry a revision its own descriptor cannot reproduce" \
   tests/test_semantic_contract.py::test_stack_validates_itself_rather_than_trusting_its_builder
+
+echo "==> the descriptor wiring feeds real installed versions into the fingerprint (weight-gated)"
+SEMANTIC_ASSETS_OK=0
+if [ -n "${CKP_SEMANTIC_MODEL_DIR:-}" ]; then
+  if "$PYTHON_BIN" -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '$SOURCE_ROOT/src')
+from ckp.semantic.assets import resolve_semantic_assets
+from ckp.semantic.errors import SemanticRefusal
+try:
+    resolve_semantic_assets(model_dir=Path('$CKP_SEMANTIC_MODEL_DIR'))
+except SemanticRefusal:
+    sys.exit(1)
+" 2>/dev/null; then
+    SEMANTIC_ASSETS_OK=1
+  fi
+fi
+
+if [ "$SEMANTIC_ASSETS_OK" -eq 1 ]; then
+  new_case
+  replace_once \
+    "src/ckp/semantic/provider.py" \
+    "        self._descriptor = _build_descriptor(runtime_versions=runtime_versions)" \
+    "        self._descriptor = _build_descriptor(runtime_versions=())  # mutant drops the real installed versions at the __init__ call site"
+  expect_red \
+    "__init__ stops wiring the real installed runtime versions into the descriptor" \
+    tests/test_semantic_embedding_provider.py::test_descriptor_provider_version_matches_the_installed_runtime_fingerprint
+elif [ "${CKP_REQUIRE_SEMANTIC:-}" = "1" ]; then
+  echo "CKP_REQUIRE_SEMANTIC=1 but no verified semantic model cache is reachable at CKP_SEMANTIC_MODEL_DIR -- cannot verify the __init__ wiring mutation" >&2
+  exit 1
+else
+  echo "skipping the __init__ wiring mutation: no local semantic model cache reachable (CKP_SEMANTIC_MODEL_DIR)"
+fi
 
 echo "C25 semantic mutation matrix complete: $CASE_NUMBER mutants, all red."
 rm -rf "$MUTATION_ROOT"

@@ -28,7 +28,12 @@ from ckp.embedding.provider import EmbeddingProvider, RerankerProvider
 from ckp.semantic.assets import resolve_semantic_assets
 from ckp.semantic.errors import SemanticRefusal
 from ckp.semantic.manifest import SEMANTIC_MODEL_DIMENSION
-from ckp.semantic.provider import SEMANTIC_EMBEDDING_ID, SemanticEmbeddingProvider
+from ckp.semantic.provider import (
+    SEMANTIC_EMBEDDING_ID,
+    SemanticEmbeddingProvider,
+    _compute_fingerprinted_provider_version,
+    _installed_runtime_versions,
+)
 
 _MODEL_DIR_RAW = os.environ.get("CKP_SEMANTIC_MODEL_DIR", "")
 _REQUIRED = os.environ.get("CKP_REQUIRE_SEMANTIC") == "1"
@@ -230,3 +235,28 @@ def test_offline_admission_still_holds_for_this_provider() -> None:
 
     provider = SemanticEmbeddingProvider(model_dir=_MODEL_DIR)
     require_offline_provider(provider.descriptor)  # must not raise
+
+
+@needs_semantic
+def test_descriptor_provider_version_matches_the_installed_runtime_fingerprint() -> (
+    None
+):
+    """R1 review, round 2 (Codex Finding 2 alive at the wiring layer): the
+    seven pure-function tests in ``tests/test_semantic_contract.py`` prove
+    ``_compute_fingerprinted_provider_version`` reacts to a changed
+    ``runtime_versions`` argument. None of them prove ``__init__`` actually
+    *passes* the real ``_installed_runtime_versions()`` into it rather than,
+    say, an empty tuple -- that call only happens inside a real
+    construction, which needs the pinned weights. This is the integration
+    check: build a real provider against the real cache, and assert its
+    descriptor's ``provider_version`` equals the fingerprint independently
+    recomputed from the actually-installed runtime versions. A mutant that
+    breaks the wiring at the ``__init__`` call site (e.g. hardcoding
+    ``runtime_versions=()``) makes this fail while every weight-free test
+    stays green.
+    """
+    provider = SemanticEmbeddingProvider(model_dir=_MODEL_DIR)
+    expected = _compute_fingerprinted_provider_version(
+        runtime_versions=_installed_runtime_versions()
+    )
+    assert provider.descriptor.provider_version == expected
