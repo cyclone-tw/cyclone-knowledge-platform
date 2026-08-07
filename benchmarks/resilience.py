@@ -6,17 +6,29 @@ measured -- Gateway down, stale snapshot, and MacBook (disconnected) offline
 answers a yes/no question with evidence, never a "probably falls back":
 
 * **Gateway down** (:func:`probe_gateway_down`): the bundle root the
-  Gateway reads from is entirely unreachable. Every read surface -- the
-  anonymous C3 routes and the authenticated C6 routes -- must answer with an
-  explicit >=500 error, never a 200 whose body quietly looks like "the
-  corpus has zero notes".
+  Gateway reads from is entirely unreachable. ``/health``, the anonymous C3
+  routes (``/catalog``, ``/query``), and the authenticated C6 routes
+  (``/scoped/catalog``, ``/scoped/query``, ``/context``) must each answer
+  with an explicit >=500 error, never a 200 whose body quietly looks like
+  "the corpus has zero notes". This list is deliberately exhaustive of the
+  routes ``ckp/app.py`` exposes minus ``/revision`` -- ``/revision`` is
+  intentionally excluded, not overlooked: its own docstring in
+  ``ckp/app.py`` frames a 200 with null fields as the honest answer to "what
+  exactly is being served" (a metadata surface), with ``/health`` as the
+  separate "am I serving" signal this scenario checks instead.
 * **Stale snapshot** (:func:`check_stale_snapshot`): a vector index built
   from one bundle content is still being served after the bundle changed
   underneath it. Contract §5.5 names "Dashboard shows a revision mismatch
-  without flagging it stale" as a rollback trigger; this dimension is the
-  benchmark-side comparison that makes the mismatch observable at all --
-  nothing in ``src/ckp`` computes it today; see the module docstring's
-  "Findings" note below.
+  without flagging it stale" as a rollback trigger. **This dimension cannot
+  report a production pass.** Nothing in ``src/ckp`` compares a served
+  revision against a live recomputation and flags a mismatch -- that
+  capability does not exist yet (tracked as #39). What this scenario
+  verifies is only that *if* such a comparison existed with the shape this
+  benchmark proposes, it would correctly distinguish "unedited" from
+  "edited-since-build" -- reported as ``benchmark_comparison_passed``,
+  never as ``passed``. ``passed`` for this scenario is hardcoded ``False``
+  and stays that way until #39 lands a real production detection path; see
+  "Findings" below.
 * **MacBook offline** (:func:`check_offline_scope_fail_closed`): C6's
   :class:`~ckp.gateway.scoped.OfflineQmdScope` is the permission projection
   meant to run disconnected. This dimension checks it stays fail-closed --
@@ -43,9 +55,12 @@ Findings from building this benchmark (reported, not fixed here):
   mismatch as stale. :func:`_is_snapshot_stale` is this benchmark's own
   comparison, not a production code path. Contract §5.5 lists "revision
   mismatch shown without a stale flag" as a rollback trigger for Phase 5;
-  today there is no production stale flag to fail. Recommend a follow-up
-  issue once P9 (#30) needs a real stale gate rather than a benchmark-only
-  one.
+  today there is no production stale flag to fail. Tracked as **#39**; the
+  report's ``stale_snapshot.passed`` field stays ``False`` and
+  ``production_detection`` stays ``"not-implemented"`` until #39 lands a
+  real production detection path -- a reader of the report must never be
+  able to mistake a correct benchmark comparator for a production
+  capability that does not exist (Codex Round 1 review, #27).
 """
 
 from __future__ import annotations
@@ -192,14 +207,31 @@ def _registry(*, grant: ScopeGrant | None = None) -> CredentialRegistry:
 # --------------------------------------------------------------------------
 
 
+#: A response body carrying any of these keys has the shape of a normal
+#: listing/answer payload (``CatalogResponse``, ``QueryResponse``, ...),
+#: never of this repo's rejection receipt (``request_id``/``status``/
+#: ``code``, or FastAPI's bare ``detail``). A 5xx wearing this shape would
+#: be "zero results" dressed up as an explicit error -- the same disguise
+#: this scenario exists to catch, just pointed the other direction.
+_LISTING_RESPONSE_KEYS = frozenset({"total", "items", "results", "revision"})
+
+
+def _looks_like_listing_schema(body: object) -> bool:
+    return isinstance(body, dict) and bool(_LISTING_RESPONSE_KEYS & body.keys())
+
+
 def _is_explicit_error(response) -> bool:
     """True only for a real failure signal, never a disguised empty success.
 
     A ``>=500`` status is required -- the caller cannot mistake it for a
-    valid answer -- and, belt and suspenders, a response is never accepted
-    as an "explicit error" if its body claims ``status == "ok"``: "zero
-    items" and "the source is unreachable" must never look alike to a
-    caller that only checks the status field.
+    valid answer. Two more checks, both belt-and-suspenders against the same
+    failure mode from opposite directions: a response is never accepted as
+    an "explicit error" if its body claims ``status == "ok"`` (a 5xx that
+    still says everything is fine), nor if its body has the shape of a
+    normal listing/answer payload -- e.g. ``{"total": 0, "items": []}`` --
+    under a 5xx status, because a caller that only skims for "did I get an
+    empty list" would read that as "zero results", not as "the source is
+    down".
     """
     if response.status_code < 500:
         return False
@@ -207,7 +239,9 @@ def _is_explicit_error(response) -> bool:
         body = response.json()
     except ValueError:
         return True
-    return not (isinstance(body, dict) and body.get("status") == "ok")
+    if isinstance(body, dict) and body.get("status") == "ok":
+        return False
+    return not _looks_like_listing_schema(body)
 
 
 def _error_evidence(response) -> dict:
@@ -246,6 +280,11 @@ def probe_gateway_down() -> ScenarioOutcome:
         anonymous_catalog = client.get("/catalog")
         anonymous_query = client.post("/query", json={"query": "resilience-needle"})
         scoped_catalog = client.get("/scoped/catalog/finance", headers=_headers())
+        scoped_query = client.post(
+            "/scoped/query/finance",
+            json={"query": "resilience-needle"},
+            headers=_headers(),
+        )
         context = client.post(
             "/context/finance",
             json={"query": "resilience-needle"},
@@ -256,6 +295,7 @@ def probe_gateway_down() -> ScenarioOutcome:
             "anonymous_catalog": anonymous_catalog,
             "anonymous_query": anonymous_query,
             "scoped_catalog": scoped_catalog,
+            "scoped_query": scoped_query,
             "context": context,
         }
         observed = {name: _error_evidence(resp) for name, resp in surfaces.items()}
@@ -306,6 +346,14 @@ def _is_snapshot_stale(
     return served_bundle_index_revision != live_bundle_index_revision
 
 
+#: Production has no revision-staleness comparison at all (see the module
+#: docstring's Findings note, tracked as #39). Naming the literal here means
+#: a caller reading the report sees the same fixed string every time, and
+#: the mutation test can pin its exact value rather than "any non-empty
+#: string that isn't the ok case".
+PRODUCTION_STALE_DETECTION_STATUS = "not-implemented"
+
+
 def check_stale_snapshot() -> ScenarioOutcome:
     """A vector index built at one bundle content, served after an edit.
 
@@ -313,8 +361,15 @@ def check_stale_snapshot() -> ScenarioOutcome:
     ``plan.bundle_index_revision`` at build time (``src/ckp/index/models.py``).
     Nothing in this repo re-checks that binding against the *current* bundle
     on every serve -- this scenario builds that missing comparison as a
-    benchmark-only dimension (see the module docstring's Findings note) and
-    asserts it actually distinguishes "unedited" from "edited-since-build".
+    benchmark-only dimension and asserts it actually distinguishes
+    "unedited" from "edited-since-build" (``benchmark_comparison_passed``).
+
+    That correctness is reported separately from ``passed``. ``passed`` is
+    hardcoded ``False`` here: a benchmark comparator behaving correctly must
+    never be presented as "stale snapshot: passed" when production has no
+    such comparison to actually run (Codex Round 1 review, #27; production
+    gap tracked as #39). Only a real detection path landing in ``src/ckp``
+    may ever flip this scenario's ``passed`` to ``True``.
     """
     stack = build_c4_deterministic_stack(
         dimension=8,
@@ -346,16 +401,24 @@ def check_stale_snapshot() -> ScenarioOutcome:
         plan.bundle_index_revision, edited_live_revision
     )
 
-    passed = (flagged_when_unedited is False) and (flagged_after_edit is True)
+    benchmark_comparison_passed = (flagged_when_unedited is False) and (
+        flagged_after_edit is True
+    )
+
+    # `passed` is deliberately NOT `benchmark_comparison_passed`. See the
+    # function docstring and PRODUCTION_STALE_DETECTION_STATUS: production
+    # has no stale-detection code path, so this scenario can never honestly
+    # report a pass, no matter how correct the benchmark-only comparator is.
+    passed = False
 
     return ScenarioOutcome(
         scenario="stale_snapshot",
         passed=passed,
         assertion=(
-            "bundle_index_revision recorded at index-build time must "
-            "compare equal to a fresh recomputation while the bundle has "
-            "not moved, and must be flagged stale the moment it diverges "
-            "from that recomputation"
+            "production must flag a bundle_index_revision mismatch as "
+            "stale; it has no such comparison today (#39), so this "
+            "scenario reports passed=false regardless of "
+            "benchmark_comparison_passed -- see production_detection"
         ),
         observed={
             "served_composed_revision": plan.composed_revision,
@@ -364,6 +427,8 @@ def check_stale_snapshot() -> ScenarioOutcome:
             "live_bundle_index_revision_after_edit": edited_live_revision,
             "flagged_stale_when_unedited": flagged_when_unedited,
             "flagged_stale_after_edit": flagged_after_edit,
+            "benchmark_comparison_passed": benchmark_comparison_passed,
+            "production_detection": PRODUCTION_STALE_DETECTION_STATUS,
         },
     )
 
@@ -492,7 +557,16 @@ def check_offline_scope_fail_closed() -> ScenarioOutcome:
 def run_resilience_benchmark() -> dict:
     """Run all three scenarios and assemble one report, schema-versioned
     like ``benchmarks/shadow.py``'s report so both can sit side by side in
-    the same Phase 4 report bundle."""
+    the same Phase 4 report bundle.
+
+    ``all_passed`` is a plain ``all(...)`` over every scenario's ``passed``
+    field, including ``stale_snapshot``'s -- which is hardcoded ``False``
+    until #39 lands a real production detection path (see
+    :func:`check_stale_snapshot`). That means ``all_passed`` cannot become
+    ``True`` on a correct benchmark comparator alone; a reader who only
+    checks ``all_passed`` still cannot be misled into thinking Phase 4's
+    stale-snapshot dimension is production-ready.
+    """
     outcomes = (
         probe_gateway_down(),
         check_stale_snapshot(),
@@ -524,6 +598,7 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "PRODUCTION_STALE_DETECTION_STATUS",
     "REPORT_SCHEMA",
     "ScenarioOutcome",
     "check_offline_scope_fail_closed",
