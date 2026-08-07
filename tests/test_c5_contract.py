@@ -51,6 +51,7 @@ def test_c5_expected_index_modules_are_present() -> None:
     assert benchmark_names == {
         "__init__.py",
         "questions.py",
+        "export_compare.py",
         "resilience.py",
         "shadow.py",
     }
