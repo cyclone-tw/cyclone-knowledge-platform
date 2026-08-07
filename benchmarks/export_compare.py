@@ -1047,7 +1047,19 @@ def diff_export_against_catalog(
         # (wiki_dashboard_export.first_heading_body /
         # development_candidates.note_title), so the Catalog side compares
         # against heading_title, never the frontmatter title: field.
-        if primary.title is not None and primary.title != catalog_entry.heading_title:
+        #
+        # Codex round 1: the export's definition INCLUDES a fallback -- all
+        # three producers (wiki_dashboard_export.py, development_candidates.py,
+        # wiki_topics.py) fall back to path.stem when a note has no ATX H1
+        # (a setext heading counts as none on both sides). Mirroring the
+        # definition means mirroring the fallback, or every heading-less note
+        # is a false positive under a reliable=True banner.
+        comparable_heading = (
+            catalog_entry.heading_title
+            if catalog_entry.heading_title is not None
+            else PurePosixPath(pilot_path).stem
+        )
+        if primary.title is not None and primary.title != comparable_heading:
             mismatched_fields.append("title")
         # The export's "status" is sourced from a different frontmatter
         # field depending on zone (issue #48): development_candidates reads
@@ -1058,8 +1070,18 @@ def diff_export_against_catalog(
             if primary.zone == _CANDIDATE_STATUS_ZONE
             else catalog_entry.status
         )
-        if primary.status is not None and primary.status != reference_status:
-            mismatched_fields.append("status")
+        # Codex round 1, same shape for status: the export emits "" when the
+        # source frontmatter field is missing, the Catalog says None. Both
+        # mean "absent from the same frontmatter", so they are normalised to
+        # None before comparing; absent-vs-value in either direction is real
+        # drift and still flags. Distinct from that: a zone that never
+        # carries status at all says None on the export side, and that keeps
+        # meaning "nothing to compare", not "absent field".
+        if primary.status is not None:
+            export_status = primary.status if primary.status != "" else None
+            catalog_status = reference_status if reference_status != "" else None
+            if export_status != catalog_status:
+                mismatched_fields.append("status")
         if mismatched_fields:
             diffs.append(
                 {
