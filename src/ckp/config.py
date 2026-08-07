@@ -27,9 +27,28 @@ from typing import Any
 
 ENV_PREFIX = "CKP_"
 
-# Selects *where* config comes from; not a config value. Kept separate so the
-# unknown-key check below cannot mistake it for a typo.
-RESERVED_ENV = frozenset({"CKP_CONFIG_FILE"})
+# `CKP_*` names that are deliberately NOT config keys, so the unknown-key check
+# below cannot mistake them for typos.
+#
+# `CKP_CONFIG_FILE` selects *where* config comes from; not a config value.
+#
+# The rest are test-harness switches read straight from `os.environ` by the
+# test modules that own them -- they never travel through config layering. CI
+# sets all three, which meant any test calling `load_config()` over the real
+# environment failed there with a message pointing at config (issue #46). The
+# failure was invisible on main because no test read the real environment, so
+# it surfaced as someone else's bug on the first PR that did.
+# `tests/test_config.py` pins that every `CKP_*` name in the CI workflow is
+# either a config key or listed here, so the next harness switch cannot
+# reintroduce this silently.
+RESERVED_ENV = frozenset(
+    {
+        "CKP_CONFIG_FILE",
+        "CKP_REQUIRE_QDRANT",
+        "CKP_REQUIRE_SEMANTIC",
+        "CKP_SEMANTIC_MODEL_DIR",
+    }
+)
 
 
 class ConfigError(ValueError):
