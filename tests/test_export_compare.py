@@ -1,17 +1,18 @@
 """P8 (issue #29): current export vs generated Catalog.
 
-Two layers, matching the AGENTS.md §9 lesson from the first batch ("pure
-functions test well, wiring does not test itself"):
+Round 2 (Codex changes-requested): "structural absence vs stale absence"
+must be data the report carries, not prose in a docstring. This file tests
+three layers:
 
-* pure-function tests for ``diff_export_against_catalog`` and
-  ``load_current_export`` -- no filesystem beyond a JSON file, no privacy
-  gate, no pilot binding;
-* an end-to-end test for ``compare_export_to_catalog`` against a synthetic
-  pilot corpus (a ``tmp_path`` wiki root plus an injected frozen manifest,
-  same pattern as ``tests/test_pilot_no_vendoring.py``) -- this is the
-  wiring test: it goes through ``bind_pilot_corpus``, the real privacy
-  gate, ``AnchoredBundleReader``, and ``CatalogBuilder``, not a mock of any
-  of them.
+* pure-function tests for :func:`zone_eligibility`, :func:`freshness_verdict`,
+  and :func:`diff_export_against_catalog` -- no filesystem beyond a JSON
+  file, no privacy gate, no pilot binding, no real git;
+* a :class:`SubprocessGitOps` wiring test against a real temporary git
+  repository -- the actual subprocess code path, not a fake standing in
+  for it (AGENTS.md §9: "純函式測得好不等於接線有測");
+* an end-to-end test for :func:`compare_export_to_catalog` against a
+  synthetic pilot corpus (a ``tmp_path`` wiki root plus an injected frozen
+  manifest, same pattern as ``tests/test_pilot_no_vendoring.py``).
 
 Never touches the real Cyclone-Wiki checkout: every note here is synthetic
 text written under ``tmp_path``.
@@ -21,17 +22,23 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 
 import pytest
 from benchmarks.export_compare import (
     EXPORT_PATH_ENV,
     ExportEntry,
     ExportUnavailable,
+    NoteFrontmatterFacts,
+    NullGitOps,
+    SubprocessGitOps,
     compare_export_to_catalog,
     default_export_path,
     diff_export_against_catalog,
+    freshness_verdict,
     load_current_export,
     resolve_export_path,
+    zone_eligibility,
 )
 
 from ckp.catalog.models import CatalogEntry, CatalogSnapshot, Citation
@@ -75,6 +82,33 @@ def _full_catalog(**overrides: dict[str, str]) -> CatalogSnapshot:
     )
 
 
+def _facts(
+    path: str,
+    *,
+    status: str | None = "active",
+    development_candidate: bool = False,
+    library_id: str | None = None,
+    privacy: str | None = "internal",
+) -> NoteFrontmatterFacts:
+    return NoteFrontmatterFacts(
+        path=path,
+        status=status,
+        development_candidate=development_candidate,
+        library_id=library_id,
+        privacy=privacy,
+    )
+
+
+def _facts_all(**per_path_overrides: dict) -> dict[str, NoteFrontmatterFacts]:
+    """Facts for all six pilot paths, all zone-ineligible by default (no
+    project- filename, not under Core/_inbox/, no library_id) -- every
+    unmatched path defaults to `reason: structural` unless overridden."""
+    return {
+        path: _facts(path, **per_path_overrides.get(path, {}))
+        for path in PILOT_NOTE_PATHS
+    }
+
+
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -111,15 +145,40 @@ def _write_synthetic_pilot_corpus(
     return manifest
 
 
-def _write_export(path, zones: dict, *, schema: str = "wiki-export.v1") -> None:
+def _write_export(
+    path, zones: dict, *, schema: str = "wiki-export.v1", commit: str = "abc1234"
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema": schema,
         "exported_at": "2026-08-01T00:00:00Z",
-        "commit": "abc1234",
+        "commit": commit,
         "zones": zones,
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+class _FakeGitOps:
+    """Deterministic stand-in for git, for pure classification tests."""
+
+    def __init__(
+        self,
+        *,
+        last_touch: dict[str, str] | None = None,
+        ancestry: dict[tuple[str, str], bool] | None = None,
+    ) -> None:
+        self._last_touch = last_touch or {}
+        self._ancestry = ancestry or {}
+
+    def last_touch_commit(self, relative_path: str) -> str | None:
+        return self._last_touch.get(relative_path)
+
+    def is_ancestor(self, ancestor: str, descendant: str) -> bool | None:
+        return self._ancestry.get((ancestor, descendant))
+
+
+def _git(*args: str, cwd) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
 
 
 # --- resolve_export_path -------------------------------------------------
@@ -205,6 +264,160 @@ def test_load_current_export_ignores_items_without_a_path(tmp_path) -> None:
     assert result.entries == ()
 
 
+# --- zone_eligibility: wiki_dashboard_export.py's rules, as data -----------
+
+
+def test_procedure_and_decision_notes_are_zone_ineligible() -> None:
+    """Neither PILOT_NOTE_PATHS procedure/decision note matches any zone's
+    path shape at all -- this is the exact structural gap Round 1 found."""
+    for path in (
+        "Core/procedure-agent-wiki-note-retrieval.md",
+        "Core/procedure-agent-memory-read-scopes.md",
+        "Core/decision-cyclone-wiki-openwiki-role-boundary.md",
+    ):
+        assert zone_eligibility(_facts(path, development_candidate=False)) == ()
+
+
+def test_project_note_with_active_status_is_projects_eligible() -> None:
+    path = "Core/project-cyclone-okf-knowledge-contract.md"
+    assert zone_eligibility(_facts(path, status="active")) == ("projects",)
+
+
+def test_project_note_without_active_status_is_zone_ineligible() -> None:
+    path = "Core/project-cyclone-okf-knowledge-contract.md"
+    assert zone_eligibility(_facts(path, status="parked")) == ()
+
+
+def test_agent_capture_with_development_candidate_flag_is_eligible() -> None:
+    path = "Core/_inbox/agent-captures/2026-07-04-relayapi-repo-analysis.md"
+    assert zone_eligibility(_facts(path, development_candidate=True)) == (
+        "development_candidates",
+    )
+
+
+def test_agent_capture_without_development_candidate_flag_is_ineligible() -> None:
+    path = "Core/_inbox/agent-captures/2026-07-04-relayapi-repo-analysis.md"
+    assert zone_eligibility(_facts(path, development_candidate=False)) == ()
+
+
+def test_note_with_library_id_and_allowed_privacy_is_topics_eligible() -> None:
+    path = "Core/some-course-note.md"
+    assert zone_eligibility(
+        _facts(path, library_id="2026-lib", privacy="internal")
+    ) == ("topics",)
+
+
+def test_knowledge_feed_and_life_domains_shapes() -> None:
+    assert zone_eligibility(
+        _facts("Private/_inbox/info-collect/2026-08-01-note.md")
+    ) == ("knowledge_feed",)
+    assert zone_eligibility(
+        _facts("Private/Life/profile/reports/2026-08-01-report.md")
+    ) == ("life_domains",)
+
+
+def test_note_can_be_eligible_for_more_than_one_zone() -> None:
+    """A project note that also carries a library_id is legitimately
+    eligible for both projects and topics -- multi-zone is not a bug."""
+    path = "Core/project-x.md"
+    facts = _facts(path, status="active", library_id="lib-1", privacy="internal")
+    assert set(zone_eligibility(facts)) == {"projects", "topics"}
+
+
+# --- freshness_verdict: never guesses ---------------------------------
+
+
+def test_freshness_unknown_when_export_commit_missing() -> None:
+    assert freshness_verdict(_FakeGitOps(), None, "Core/x.md") == "unknown"
+
+
+def test_freshness_unknown_when_git_has_no_last_touch_commit() -> None:
+    git_ops = _FakeGitOps(last_touch={})
+    assert freshness_verdict(git_ops, "abc123", "Core/x.md") == "unknown"
+
+
+def test_freshness_current_when_last_touch_equals_export_commit() -> None:
+    git_ops = _FakeGitOps(last_touch={"Core/x.md": "abc123"})
+    assert freshness_verdict(git_ops, "abc123", "Core/x.md") == "current"
+
+
+def test_freshness_stale_when_export_commit_is_ancestor_of_last_touch() -> None:
+    git_ops = _FakeGitOps(
+        last_touch={"Core/x.md": "newcommit"},
+        ancestry={("oldcommit", "newcommit"): True},
+    )
+    assert freshness_verdict(git_ops, "oldcommit", "Core/x.md") == "stale"
+
+
+def test_freshness_current_when_export_commit_is_not_an_ancestor() -> None:
+    """The note's last-touch commit already predates (or equals a sibling
+    of) the export commit -- the export is not stale relative to it."""
+    git_ops = _FakeGitOps(
+        last_touch={"Core/x.md": "oldcommit"},
+        ancestry={("newcommit", "oldcommit"): False},
+    )
+    assert freshness_verdict(git_ops, "newcommit", "Core/x.md") == "current"
+
+
+def test_freshness_unknown_when_ancestry_is_ambiguous() -> None:
+    git_ops = _FakeGitOps(last_touch={"Core/x.md": "newcommit"}, ancestry={})
+    assert freshness_verdict(git_ops, "oldcommit", "Core/x.md") == "unknown"
+
+
+def test_null_git_ops_always_reports_unknown() -> None:
+    assert freshness_verdict(NullGitOps(), "abc123", "Core/x.md") == "unknown"
+
+
+# --- SubprocessGitOps: real git wiring, not a fake standing in for it -----
+
+
+def test_subprocess_git_ops_against_a_real_temporary_repo(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git("init", "-q", cwd=repo)
+    _git("config", "user.email", "test@example.com", cwd=repo)
+    _git("config", "user.name", "Test", cwd=repo)
+
+    (repo / "Core").mkdir()
+    (repo / "Core" / "a.md").write_text("v1\n", encoding="utf-8")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "first", cwd=repo)
+    first_commit = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    (repo / "Core" / "a.md").write_text("v2\n", encoding="utf-8")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "second", cwd=repo)
+    second_commit = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    git_ops = SubprocessGitOps(wiki_root=repo)
+    assert git_ops.last_touch_commit("Core/a.md") == second_commit
+    assert git_ops.is_ancestor(first_commit, second_commit) is True
+    assert git_ops.is_ancestor(second_commit, first_commit) is False
+    assert git_ops.last_touch_commit("Core/does-not-exist.md") is None
+    assert git_ops.is_ancestor("not-a-real-commit", second_commit) is None
+
+    assert freshness_verdict(git_ops, first_commit, "Core/a.md") == "stale"
+    assert freshness_verdict(git_ops, second_commit, "Core/a.md") == "current"
+
+
+def test_subprocess_git_ops_on_a_non_git_directory_is_unknown_not_a_crash(
+    tmp_path,
+) -> None:
+    git_ops = SubprocessGitOps(wiki_root=tmp_path)
+    assert git_ops.last_touch_commit("Core/a.md") is None
+    assert git_ops.is_ancestor("a", "b") is None
+
+
 # --- diff_export_against_catalog: pure classification ----------------------
 
 
@@ -214,13 +427,95 @@ def test_all_six_match_cleanly_produces_no_diffs() -> None:
         ExportEntry(zone="projects", path=path, title="Title", status="active")
         for path in PILOT_NOTE_PATHS
     )
-    diffs, summary = diff_export_against_catalog(entries, catalog)
+    diffs, summary = diff_export_against_catalog(
+        entries,
+        catalog,
+        facts_by_path=_facts_all(),
+        export_commit="abc1234",
+        git_ops=NullGitOps(),
+    )
     assert diffs == []
     assert summary["matched_clean"] == 6
     assert summary["missing_from_export"] == 0
-    assert summary["extra_in_export"] == 0
-    assert summary["metadata_mismatch"] == 0
-    assert summary["path_mismatch"] == 0
+
+
+def test_structural_absence_and_freshness_absence_are_different_categories() -> None:
+    """The exact Round 1 finding, made into a test: a procedure note (zone-
+    ineligible) and a project note (zone-eligible, export stale) must land
+    in different reasons even though both are simply absent from export."""
+    catalog = _full_catalog()
+    procedure_path = "Core/procedure-agent-wiki-note-retrieval.md"
+    project_path = "Core/project-cyclone-okf-knowledge-contract.md"
+
+    facts = _facts_all()
+    facts[procedure_path] = _facts(procedure_path, development_candidate=False)
+    facts[project_path] = _facts(project_path, status="active")
+
+    git_ops = _FakeGitOps(
+        last_touch={project_path: "newcommit"},
+        ancestry={("export-commit", "newcommit"): True},
+    )
+
+    diffs, summary = diff_export_against_catalog(
+        (),  # nothing in the export at all
+        catalog,
+        facts_by_path=facts,
+        export_commit="export-commit",
+        git_ops=git_ops,
+    )
+
+    missing = {d["path"]: d for d in diffs if d["category"] == "missing_from_export"}
+    assert missing[procedure_path]["reason"] == "structural"
+    assert missing[project_path]["reason"] == "freshness"
+    assert summary["missing_from_export_structural"] >= 1
+    assert summary["missing_from_export_freshness"] == 1
+    assert (
+        summary["missing_from_export_structural"]
+        + summary["missing_from_export_freshness"]
+        <= summary["missing_from_export"]
+    )
+
+
+def test_missing_reason_is_unknown_when_git_signal_is_ambiguous() -> None:
+    project_path = "Core/project-cyclone-okf-knowledge-contract.md"
+    facts = {project_path: _facts(project_path, status="active")}
+    git_ops = _FakeGitOps()  # no last-touch data at all
+
+    diffs, summary = diff_export_against_catalog(
+        (),
+        CatalogSnapshot(
+            entries=(_catalog_entry(project_path),),
+            index_revision="sha256:test",
+            bundle_commit=None,
+        ),
+        facts_by_path=facts,
+        export_commit="export-commit",
+        git_ops=git_ops,
+    )
+    missing = next(d for d in diffs if d["category"] == "missing_from_export")
+    assert missing["reason"] == "unknown"
+    assert summary["missing_from_export_unknown"] == 1
+
+
+def test_missing_reason_structural_ignores_freshness_even_when_commit_present() -> None:
+    """A structurally-ineligible note must never fall into freshness/unknown
+    just because export_commit happens to be set -- eligibility is checked
+    first and short-circuits."""
+    catalog = _full_catalog()
+    procedure_path = PILOT_NOTE_PATHS[0]
+    git_ops = _FakeGitOps(
+        last_touch={procedure_path: "some-commit"},
+        ancestry={("export-commit", "some-commit"): True},
+    )
+    diffs, _ = diff_export_against_catalog(
+        (),
+        catalog,
+        facts_by_path=_facts_all(),
+        export_commit="export-commit",
+        git_ops=git_ops,
+    )
+    missing = next(d for d in diffs if d["path"] == procedure_path)
+    assert missing["reason"] == "structural"
 
 
 def test_path_absent_from_export_is_missing_from_export() -> None:
@@ -229,10 +524,16 @@ def test_path_absent_from_export_is_missing_from_export() -> None:
         ExportEntry(zone="projects", path=path, title="Title", status="active")
         for path in PILOT_NOTE_PATHS[1:]
     )
-    diffs, summary = diff_export_against_catalog(entries, catalog)
+    diffs, summary = diff_export_against_catalog(
+        entries,
+        catalog,
+        facts_by_path=_facts_all(),
+        export_commit="abc1234",
+        git_ops=NullGitOps(),
+    )
     assert summary["missing_from_export"] == 1
     missing = [d for d in diffs if d["category"] == "missing_from_export"]
-    assert missing == [{"category": "missing_from_export", "path": PILOT_NOTE_PATHS[0]}]
+    assert missing[0]["path"] == PILOT_NOTE_PATHS[0]
 
 
 def test_out_of_scope_export_entry_is_silently_excluded_not_reported() -> None:
@@ -248,7 +549,13 @@ def test_out_of_scope_export_entry_is_silently_excluded_not_reported() -> None:
             zone="projects", path="Core/some-other-note.md", title="X", status=None
         ),
     )
-    diffs, summary = diff_export_against_catalog(entries, catalog)
+    diffs, summary = diff_export_against_catalog(
+        entries,
+        catalog,
+        facts_by_path=_facts_all(),
+        export_commit="abc1234",
+        git_ops=NullGitOps(),
+    )
     assert diffs == []
     assert summary["matched_clean"] == 6
 
@@ -264,12 +571,59 @@ def test_duplicate_zone_entries_are_extra_in_export_not_merged_into_missing() ->
             zone="knowledge_feed", path=dup_path, title="Title", status="active"
         ),
     )
-    diffs, summary = diff_export_against_catalog(entries, catalog)
+    diffs, summary = diff_export_against_catalog(
+        entries,
+        catalog,
+        facts_by_path=_facts_all(),
+        export_commit="abc1234",
+        git_ops=NullGitOps(),
+    )
     assert summary["extra_in_export"] == 1
     assert summary["missing_from_export"] == 0
     extra = [d for d in diffs if d["category"] == "extra_in_export"]
     assert extra[0]["path"] == dup_path
     assert extra[0]["zones"] == ["knowledge_feed"]
+    # dup_path's facts default to zone-ineligible for knowledge_feed -> the
+    # duplicate zone must be reported as an anomaly, not a legitimate second
+    # representation.
+    assert extra[0]["reasons"] == ["zone_not_eligible"]
+
+
+def test_duplicate_zone_entry_in_a_legitimately_eligible_zone_is_labeled_as_such() -> (
+    None
+):
+    dup_path = "Core/project-x.md"
+    catalog = CatalogSnapshot(
+        entries=(_catalog_entry(dup_path),)
+        + tuple(_catalog_entry(p) for p in PILOT_NOTE_PATHS[1:]),
+        index_revision="sha256:test",
+        bundle_commit=None,
+    )
+    facts = _facts_all()
+    facts[dup_path] = _facts(dup_path, status="active", library_id="lib-1")
+    pilot_paths_patched = (dup_path,) + PILOT_NOTE_PATHS[1:]
+    entries = tuple(
+        ExportEntry(zone="projects", path=path, title="Title", status="active")
+        for path in pilot_paths_patched
+    ) + (ExportEntry(zone="topics", path=dup_path, title="Title", status=None),)
+
+    import benchmarks.export_compare as export_compare_module
+
+    original = export_compare_module.PILOT_NOTE_PATHS
+    export_compare_module.PILOT_NOTE_PATHS = pilot_paths_patched
+    try:
+        diffs, _ = diff_export_against_catalog(
+            entries,
+            catalog,
+            facts_by_path=facts,
+            export_commit="abc1234",
+            git_ops=NullGitOps(),
+        )
+    finally:
+        export_compare_module.PILOT_NOTE_PATHS = original
+
+    extra = next(d for d in diffs if d["category"] == "extra_in_export")
+    assert extra["reasons"] == ["duplicate_in_eligible_zone"]
 
 
 def test_title_mismatch_is_metadata_mismatch_with_field_name_only() -> None:
@@ -286,7 +640,13 @@ def test_title_mismatch_is_metadata_mismatch_with_field_name_only() -> None:
         )
         for path in PILOT_NOTE_PATHS
     )
-    diffs, summary = diff_export_against_catalog(entries, catalog)
+    diffs, summary = diff_export_against_catalog(
+        entries,
+        catalog,
+        facts_by_path=_facts_all(),
+        export_commit="abc1234",
+        git_ops=NullGitOps(),
+    )
     assert summary["metadata_mismatch"] == 1
     mismatch = next(d for d in diffs if d["category"] == "metadata_mismatch")
     assert mismatch["path"] == mismatched_path
@@ -309,7 +669,13 @@ def test_status_mismatch_is_reported_by_field_name() -> None:
         )
         for path in PILOT_NOTE_PATHS
     )
-    diffs, summary = diff_export_against_catalog(entries, catalog)
+    diffs, _ = diff_export_against_catalog(
+        entries,
+        catalog,
+        facts_by_path=_facts_all(),
+        export_commit="abc1234",
+        git_ops=NullGitOps(),
+    )
     mismatch = next(d for d in diffs if d["category"] == "metadata_mismatch")
     assert mismatch["fields"] == ["status"]
     assert "deprecated" not in json.dumps(diffs)
@@ -323,7 +689,13 @@ def test_export_field_none_is_not_compared_not_a_mismatch() -> None:
         ExportEntry(zone="knowledge_feed", path=path, title="Title", status=None)
         for path in PILOT_NOTE_PATHS
     )
-    diffs, summary = diff_export_against_catalog(entries, catalog)
+    diffs, summary = diff_export_against_catalog(
+        entries,
+        catalog,
+        facts_by_path=_facts_all(),
+        export_commit="abc1234",
+        git_ops=NullGitOps(),
+    )
     assert diffs == []
     assert summary["matched_clean"] == 6
 
@@ -339,7 +711,13 @@ def test_path_mismatch_when_raw_path_differs_but_normalizes_the_same() -> None:
         ExportEntry(zone="projects", path=path, title="Title", status="active")
         for path in PILOT_NOTE_PATHS[1:]
     )
-    diffs, summary = diff_export_against_catalog(entries, catalog)
+    diffs, summary = diff_export_against_catalog(
+        entries,
+        catalog,
+        facts_by_path=_facts_all(),
+        export_commit="abc1234",
+        git_ops=NullGitOps(),
+    )
     assert summary["path_mismatch"] == 1
     mismatch = next(d for d in diffs if d["category"] == "path_mismatch")
     assert mismatch["path"] == odd_path
@@ -357,7 +735,13 @@ def test_missing_from_catalog_defensive_branch() -> None:
         ExportEntry(zone="projects", path=path, title="Title", status="active")
         for path in PILOT_NOTE_PATHS
     )
-    diffs, summary = diff_export_against_catalog(entries, incomplete)
+    diffs, _ = diff_export_against_catalog(
+        entries,
+        incomplete,
+        facts_by_path=_facts_all(),
+        export_commit="abc1234",
+        git_ops=NullGitOps(),
+    )
     missing_catalog = [d for d in diffs if d["category"] == "missing_from_catalog"]
     assert len(missing_catalog) == len(PILOT_NOTE_PATHS) - 1
 
@@ -367,10 +751,19 @@ def test_missing_from_catalog_defensive_branch() -> None:
 
 def test_summary_has_all_categories_as_distinct_keys() -> None:
     catalog = _full_catalog()
-    diffs, summary = diff_export_against_catalog((), catalog)
+    diffs, summary = diff_export_against_catalog(
+        (),
+        catalog,
+        facts_by_path=_facts_all(),
+        export_commit="abc1234",
+        git_ops=NullGitOps(),
+    )
     assert set(summary) == {
         "pilot_scope_count",
         "missing_from_export",
+        "missing_from_export_structural",
+        "missing_from_export_freshness",
+        "missing_from_export_unknown",
         "extra_in_export",
         "metadata_mismatch",
         "path_mismatch",
@@ -393,6 +786,7 @@ def test_compared_false_when_export_unavailable_has_no_diffs_key(tmp_path) -> No
         config,
         export_path=tmp_path / "no-such-export.json",
         frozen_manifest=manifest,
+        git_ops=NullGitOps(),
     )
 
     assert report["compared"] is False
@@ -418,7 +812,10 @@ def test_compared_true_end_to_end_against_synthetic_corpus(tmp_path) -> None:
     config = load_config(env={"CKP_PILOT_WIKI_ROOT": str(wiki_root)})
 
     report = compare_export_to_catalog(
-        config, export_path=export_path, frozen_manifest=manifest
+        config,
+        export_path=export_path,
+        frozen_manifest=manifest,
+        git_ops=NullGitOps(),
     )
 
     assert report["compared"] is True
@@ -428,11 +825,13 @@ def test_compared_true_end_to_end_against_synthetic_corpus(tmp_path) -> None:
     assert report["catalog"]["entry_count"] == 6
 
 
-def test_compared_true_but_partial_coverage_reports_missing(tmp_path) -> None:
+def test_compared_true_but_partial_coverage_reports_missing_with_reasons(
+    tmp_path,
+) -> None:
     """The realistic shape of the real wiki-export.v1.json today: it has no
     zone for Procedure/Decision notes at all, so most of the pilot corpus
-    is structurally missing_from_export -- this must show up, not be
-    hidden by only checking `compared`."""
+    is structurally missing_from_export -- this must show up, split by
+    reason, not merged into one undifferentiated bucket."""
     wiki_root = tmp_path / "wiki"
     manifest = _write_synthetic_pilot_corpus(wiki_root)
     export_path = tmp_path / "wiki-export.v1.json"
@@ -447,14 +846,38 @@ def test_compared_true_but_partial_coverage_reports_missing(tmp_path) -> None:
     )
     config = load_config(env={"CKP_PILOT_WIKI_ROOT": str(wiki_root)})
 
+    # None of these synthetic notes set development_candidate: true, and
+    # none are project-*.md files -- every unmatched one is structurally
+    # ineligible for every zone, which NullGitOps cannot override (freshness
+    # is never even consulted for a structurally-ineligible note).
     report = compare_export_to_catalog(
-        config, export_path=export_path, frozen_manifest=manifest
+        config,
+        export_path=export_path,
+        frozen_manifest=manifest,
+        git_ops=NullGitOps(),
     )
 
     assert report["compared"] is True
-    missing = [d for d in report["diffs"] if d["category"] == "missing_from_export"]
+    missing = {
+        d["path"]: d for d in report["diffs"] if d["category"] == "missing_from_export"
+    }
     assert len(missing) == len(PILOT_NOTE_PATHS) - 1
-    assert report["summary"]["missing_from_export"] == len(PILOT_NOTE_PATHS) - 1
+    # Indices 0,1,2 (two procedures + one decision) and 4 (an agent-capture
+    # whose synthetic body never sets development_candidate: true) are
+    # structurally ineligible for every zone. Index 3 is
+    # Core/project-cyclone-okf-knowledge-contract.md -- its filename and
+    # `status: active` make it *eligible* for the projects zone, so its
+    # absence is not structural; with NullGitOps supplying no freshness
+    # signal at all, it must land in "unknown", never guessed as either of
+    # the other two reasons.
+    structural_paths = {PILOT_NOTE_PATHS[i] for i in (0, 1, 2, 4)}
+    project_path = PILOT_NOTE_PATHS[3]
+    assert {p: d["reason"] for p, d in missing.items() if p in structural_paths} == {
+        p: "structural" for p in structural_paths
+    }
+    assert missing[project_path]["reason"] == "unknown"
+    assert report["summary"]["missing_from_export_structural"] == len(structural_paths)
+    assert report["summary"]["missing_from_export_unknown"] == 1
 
 
 def test_result_is_reproducible_run_twice_same_inputs(tmp_path) -> None:
@@ -473,10 +896,10 @@ def test_result_is_reproducible_run_twice_same_inputs(tmp_path) -> None:
     config = load_config(env={"CKP_PILOT_WIKI_ROOT": str(wiki_root)})
 
     first = compare_export_to_catalog(
-        config, export_path=export_path, frozen_manifest=manifest
+        config, export_path=export_path, frozen_manifest=manifest, git_ops=NullGitOps()
     )
     second = compare_export_to_catalog(
-        config, export_path=export_path, frozen_manifest=manifest
+        config, export_path=export_path, frozen_manifest=manifest, git_ops=NullGitOps()
     )
     assert first == second
 
@@ -488,6 +911,44 @@ def test_pilot_binding_failure_propagates_not_swallowed(tmp_path) -> None:
     config = load_config(env={})
     with pytest.raises(PilotBindingError, match="CKP_PILOT_WIKI_ROOT"):
         compare_export_to_catalog(config)
+
+
+def test_compare_export_to_catalog_uses_real_subprocess_git_ops_by_default(
+    tmp_path,
+) -> None:
+    """No git_ops override -> SubprocessGitOps against a real (non-git)
+    tmp_path -- must degrade to "unknown", not crash."""
+    wiki_root = tmp_path / "wiki"
+    manifest = _write_synthetic_pilot_corpus(wiki_root)
+    export_path = tmp_path / "wiki-export.v1.json"
+    covered = PILOT_NOTE_PATHS[-1]
+    _write_export(
+        export_path,
+        zones={
+            "development_candidates": [
+                {"path": covered, "title": "Title", "status": "needs-validation"}
+            ]
+        },
+    )
+    config = load_config(env={"CKP_PILOT_WIKI_ROOT": str(wiki_root)})
+
+    report = compare_export_to_catalog(
+        config, export_path=export_path, frozen_manifest=manifest
+    )
+    assert report["compared"] is True
+    # tmp_path is not a git repository, so SubprocessGitOps degrades to
+    # "unknown" for every query -- this must not crash, and a
+    # structurally-ineligible note must still report "structural" (freshness
+    # is never even consulted for those), while the one zone-eligible note
+    # (the project path, index 3) reports "unknown" rather than a guess.
+    missing = {
+        d["path"]: d for d in report["diffs"] if d["category"] == "missing_from_export"
+    }
+    structural_paths = {PILOT_NOTE_PATHS[i] for i in (0, 1, 2, 4)}
+    assert {p: d["reason"] for p, d in missing.items() if p in structural_paths} == {
+        p: "structural" for p in structural_paths
+    }
+    assert missing[PILOT_NOTE_PATHS[3]]["reason"] == "unknown"
 
 
 # --- CLI entrypoint ----------------------------------------------------
