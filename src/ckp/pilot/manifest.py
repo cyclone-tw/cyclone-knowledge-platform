@@ -107,6 +107,16 @@ _ALLOWED_NOTE_KEYS = frozenset({"relative_path", "content_sha256"})
 # ignoring an undeclared top-level key is the same RP1 hole one layer up.
 _ALLOWED_TOP_LEVEL_KEYS = frozenset({"note"})
 
+#: Codex round 2 on #36: a *string* value is still a smuggling vehicle,
+#: because two downstream diagnostics echo manifest-derived values (the RP4
+#: allowlist mismatch echoes the found paths; the hash-drift error echoes the
+#: pinned hash). The rule that makes those echoes safe is format validation
+#: BEFORE any echo: a 64-hex string cannot carry a payload, and a bounded
+#: path-shaped string cannot carry a note body. Anything format-invalid is
+#: refused *without being repeated*.
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+_RELATIVE_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,300}$")
+
 
 @dataclass(frozen=True)
 class PilotManifest:
@@ -234,9 +244,14 @@ def load_frozen_manifest(config: Config) -> PilotManifest:
         # value must be a plain string; anything else is refused *without
         # echoing the value* (a manifest is outside the Markdown privacy
         # scanner's reach, so an error message is a leak path too).
-        for field_name, value in (
-            ("relative_path", relative_path),
-            ("content_sha256", content_sha256),
+        for field_name, value, pattern, shape in (
+            ("relative_path", relative_path, _RELATIVE_PATH_RE, "a bounded path"),
+            (
+                "content_sha256",
+                content_sha256,
+                _SHA256_HEX_RE,
+                "64 lowercase hex chars",
+            ),
         ):
             if not isinstance(value, str):
                 raise PilotBindingError(
@@ -244,6 +259,14 @@ def load_frozen_manifest(config: Config) -> PilotManifest:
                     f"must be a string, got {type(value).__name__} -- a "
                     "non-string value is a place to smuggle content, and its "
                     "contents are deliberately not repeated here"
+                )
+            if not pattern.match(value):
+                raise PilotBindingError(
+                    f"{manifest_path}: [[note]] #{index} field {field_name!r} "
+                    f"is not {shape} -- a free-form string is a place to "
+                    "smuggle content, and every later diagnostic on this data "
+                    "path echoes field values, so a format-invalid one is "
+                    "refused without being repeated"
                 )
         entries.append(
             PilotManifestEntry(

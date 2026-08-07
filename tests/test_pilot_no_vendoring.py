@@ -88,6 +88,52 @@ def test_load_frozen_manifest_rejects_paths_that_drift_from_the_allowlist(
 
 
 @pytest.mark.parametrize(
+    "field,value,marker",
+    [
+        ("content_sha256", "LEAKED note body pretending to be a hash", "LEAKED"),
+        ("content_sha256", "f" * 63, None),
+        ("relative_path", "LEAKED\nnote body\nwith newlines", "LEAKED"),
+        ("relative_path", "x" * 301, None),
+    ],
+    ids=["sha-freeform", "sha-63-hex", "path-newlines", "path-overlong"],
+)
+def test_format_invalid_string_values_are_refused_without_echo(
+    tmp_path, field: str, value: str, marker: str | None
+) -> None:
+    """Codex round 2 on #36: a *string* can smuggle content too.
+
+    Downstream diagnostics echo manifest-derived values (the RP4 mismatch
+    echoes found paths, the hash-drift error echoes the pinned hash), so the
+    string type check alone left the echoes as a leak path. Format validation
+    before any echo is what makes them safe: a 64-hex hash and a bounded
+    path shape cannot carry a body. Format-invalid values are refused and --
+    the actual point -- never repeated in the message.
+    """
+    manifest_file = tmp_path / "pilot-manifest.toml"
+    values = {"relative_path": None, "content_sha256": None}
+    lines = []
+    for index, path in enumerate(PILOT_NOTE_PATHS):
+        rp = value if (index == 0 and field == "relative_path") else path
+        sha = value if (index == 0 and field == "content_sha256") else "0" * 64
+        lines.append(
+            "[[note]]\nrelative_path = "
+            + repr(rp).replace("'", '"')
+            + '\ncontent_sha256 = "'
+            + sha
+            + '"'
+        )
+    manifest_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    config = load_config(env={"CKP_PILOT_MANIFEST_PATH": str(manifest_file)})
+    with pytest.raises(PilotBindingError) as excinfo:
+        load_frozen_manifest(config)
+    message = str(excinfo.value)
+    assert field in message
+    if marker is not None:
+        assert marker not in message  # the value itself must never be echoed
+
+
+@pytest.mark.parametrize(
     "value_toml,type_name",
     [
         ('{ body = "leaked note body" }', "dict"),
