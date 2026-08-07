@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
-from ckp.config import ConfigError, _coerce, load_config
+from ckp.config import (
+    RESERVED_ENV,
+    ConfigError,
+    _coerce,
+    _env_name,
+    _load_defaults,
+    load_config,
+)
+from conftest import REPO_ROOT
 
 
 def test_defaults_only_records_one_layer() -> None:
@@ -186,3 +196,49 @@ def test_absolute_note_glob_is_rejected_at_load() -> None:
 def test_usable_note_glob_survives_validation() -> None:
     config = load_config(env={"CKP_BUNDLE_NOTE_GLOB": "notes/**/*.md"})
     assert config.bundle_note_glob == "notes/**/*.md"
+
+
+def _ci_workflow_env_names() -> set[str]:
+    """Every ``CKP_*`` name the CI workflow sets, read from the YAML itself.
+
+    Parsed with a regex rather than a YAML loader on purpose: the assertion is
+    about names appearing anywhere in the file, so it must not depend on where
+    in the job tree they sit, and PyYAML is not a test dependency here.
+    """
+    workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    return set(re.findall(r"^\s*(CKP_[A-Z0-9_]+)\s*:", workflow, re.MULTILINE))
+
+
+def test_every_ci_env_name_is_a_config_key_or_explicitly_reserved() -> None:
+    """Issue #46: CI set three ``CKP_*`` harness switches config had never
+    heard of, so any test reading the real environment blew up there with a
+    message blaming config -- on the first unrelated PR that happened to add
+    such a test, months after the switches landed.
+
+    A harness switch is a legitimate thing to have. Silently colliding with a
+    fail-closed allowlist is not. This fails at the moment a new name is added
+    without a decision about which side it belongs on.
+    """
+    defaults = _load_defaults()
+    config_keys = {
+        _env_name(section, key)
+        for section, entries in defaults.items()
+        for key in entries
+    }
+    for name in sorted(_ci_workflow_env_names()):
+        assert name in config_keys or name in RESERVED_ENV, (
+            f"{name} is set by .github/workflows/ci.yml but is neither a "
+            f"config key from defaults.toml nor listed in RESERVED_ENV; "
+            f"loading config over the real CI environment would raise "
+            f"ConfigError. Register it in defaults.toml if it is a config "
+            f"value, or add it to RESERVED_ENV if it is a harness switch."
+        )
+
+
+def test_the_ci_workflow_actually_sets_some_ckp_names() -> None:
+    """Guards the guard: a regex that silently matched nothing would make the
+    check above pass for every possible workflow.
+    """
+    assert len(_ci_workflow_env_names()) >= 3
