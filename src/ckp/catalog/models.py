@@ -26,6 +26,22 @@ class CatalogEntry:
     module_id: str | None
     tags: tuple[str, ...] | None
     citation: Citation
+    # The note's first Markdown "# " heading text (or None if it has none).
+    # Same definition ``cyclone-wiki`` ``wiki_dashboard_export.first_heading_body``
+    # and ``development_candidates.note_title`` both use for the "title" they
+    # export -- a *different* field from ``title`` above, which is the
+    # frontmatter ``title:`` scalar. Kept separate rather than merged so a
+    # comparison against an export-derived title can use the matching
+    # definition instead of silently comparing two different fields that
+    # happen to share a name (issue #48).
+    heading_title: str | None
+    # frontmatter ``candidate_status:`` -- the field
+    # ``development_candidates.candidate_record`` actually reads for the
+    # ``"status"`` it exports for ``development_candidates`` zone items
+    # (``frontmatter.get("candidate_status", "")``), distinct from the plain
+    # ``status:`` frontmatter field above that ``projects``/``topics`` read
+    # (issue #48).
+    candidate_status: str | None
     # Gateway needs body text for deterministic lexical matching, but this is
     # never a Catalog API field and never appears in repr/error payloads.
     body: str = field(repr=False)

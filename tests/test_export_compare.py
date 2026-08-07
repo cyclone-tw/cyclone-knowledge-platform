@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from pathlib import PurePosixPath
 
 import pytest
 from benchmarks.export_compare import (
@@ -48,9 +49,21 @@ from ckp.pilot.manifest import PILOT_NOTE_PATHS, PilotManifest, PilotManifestEnt
 # --- helpers -----------------------------------------------------------
 
 
+_HEADING_DEFAULT = object()
+
+
 def _catalog_entry(
-    path: str, *, title: str = "Title", status: str = "active"
+    path: str,
+    *,
+    title: str = "Title",
+    heading_title: object = _HEADING_DEFAULT,
+    status: str = "active",
+    candidate_status: str | None = None,
 ) -> CatalogEntry:
+    """``heading_title`` defaults to ``title`` -- most fixtures do not care
+    about the title/heading_title distinction (issue #48) and want a
+    synthetic entry that matches on both by default; pass ``heading_title``
+    explicitly to test the two fields diverging."""
     concept_id = path[:-3]
     return CatalogEntry(
         concept_id=concept_id,
@@ -69,6 +82,8 @@ def _catalog_entry(
             index_revision="sha256:test",
             bundle_commit=None,
         ),
+        heading_title=title if heading_title is _HEADING_DEFAULT else heading_title,
+        candidate_status=candidate_status,
         body="body text never leaves this synthetic fixture",
     )
 
@@ -114,16 +129,36 @@ def _sha256(text: str) -> str:
 
 
 def _note(
-    *, note_type: str = "Procedure", title: str = "Title", status: str = "active"
+    *,
+    note_type: str = "Procedure",
+    title: str = "Title",
+    heading: str | None = None,
+    status: str = "active",
+    development_candidate: bool = False,
+    candidate_status: str | None = None,
 ) -> str:
-    return (
-        "---\n"
-        f"type: {note_type}\n"
-        "privacy: internal\n"
-        f"title: {title}\n"
-        f"status: {status}\n"
-        "---\n\n# note\n\nbody\n"
-    )
+    """``heading`` (the note body's first ``# `` line) defaults to ``title``
+    so a synthetic note's frontmatter ``title:`` and export-derived
+    ``heading_title`` agree unless a test explicitly wants them to diverge
+    (issue #48: the two are different fields, this fixture just does not
+    exercise that divergence unless asked)."""
+    lines = [
+        "---",
+        f"type: {note_type}",
+        "privacy: internal",
+        f"title: {title}",
+        f"status: {status}",
+    ]
+    if development_candidate:
+        lines.append("development_candidate: true")
+    if candidate_status is not None:
+        lines.append(f"candidate_status: {candidate_status}")
+    lines.append("---")
+    lines.append("")
+    lines.append(f"# {heading if heading is not None else title}")
+    lines.append("")
+    lines.append("body")
+    return "\n".join(lines) + "\n"
 
 
 def _write_synthetic_pilot_corpus(
@@ -890,6 +925,10 @@ def test_extra_in_export_flags_an_ineligible_primary_zone_not_just_the_duplicate
 
 
 def test_title_mismatch_is_metadata_mismatch_with_field_name_only() -> None:
+    """#48: title compares export title against CatalogEntry.heading_title
+    (the first Markdown heading), never the frontmatter title: field --
+    _catalog_entry()'s heading_title defaults to its title arg, so this
+    fixture's "Title" is standing in for heading_title here."""
     catalog = _full_catalog()
     mismatched_path = PILOT_NOTE_PATHS[0]
     entries = tuple(
@@ -920,6 +959,113 @@ def test_title_mismatch_is_metadata_mismatch_with_field_name_only() -> None:
     assert serialized.count("title") >= 1  # only the field *name* survives
 
 
+def test_headingless_note_falls_back_to_stem_like_the_export_does() -> None:
+    """Codex round 1 on #48: the export's title definition includes a
+    path.stem fallback when a note has no ATX H1 (all three producers), so a
+    heading-less note whose export title equals its stem is a match, not a
+    mismatch -- otherwise every such note is a false positive under
+    metadata_mismatch_reliable=True."""
+    path = PILOT_NOTE_PATHS[0]
+    stem = PurePosixPath(path).stem
+    entry = _catalog_entry(path, heading_title=None)
+    catalog = CatalogSnapshot(
+        entries=(entry,) + tuple(_catalog_entry(p) for p in PILOT_NOTE_PATHS[1:]),
+        index_revision="sha256:test",
+        bundle_commit=None,
+    )
+    entries = (
+        ExportEntry(zone="development_candidates", path=path, title=stem, status=""),
+    ) + tuple(
+        ExportEntry(zone="projects", path=p, title="Title", status="active")
+        for p in PILOT_NOTE_PATHS[1:]
+    )
+    diffs, summary = diff_export_against_catalog(
+        entries,
+        catalog,
+        facts_by_path=_facts_all(),
+        export_commit="abc1234",
+        git_ops=NullGitOps(),
+    )
+    assert summary["metadata_mismatch"] == 0, diffs
+
+
+def test_absent_status_on_both_sides_is_not_a_mismatch() -> None:
+    """The export emits "" for a missing status field; the Catalog says None.
+    Same absence, two spellings -- normalised before comparing. Absent versus
+    a real value still flags (that is drift)."""
+    path = PILOT_NOTE_PATHS[0]
+
+    def run(candidate_status: str | None, export_status: str) -> dict:
+        entry = _catalog_entry(path, candidate_status=candidate_status)
+        catalog = CatalogSnapshot(
+            entries=(entry,) + tuple(_catalog_entry(p) for p in PILOT_NOTE_PATHS[1:]),
+            index_revision="sha256:test",
+            bundle_commit=None,
+        )
+        entries = (
+            ExportEntry(
+                zone="development_candidates",
+                path=path,
+                title="Title",
+                status=export_status,
+            ),
+        ) + tuple(
+            ExportEntry(zone="projects", path=p, title="Title", status="active")
+            for p in PILOT_NOTE_PATHS[1:]
+        )
+        _, summary = diff_export_against_catalog(
+            entries,
+            catalog,
+            facts_by_path=_facts_all(),
+            export_commit="abc1234",
+            git_ops=NullGitOps(),
+        )
+        return summary
+
+    assert run(None, "")["metadata_mismatch"] == 0
+    assert run("in-development", "")["metadata_mismatch"] == 1
+
+
+def test_title_compares_heading_title_not_frontmatter_title() -> None:
+    """The exact #48 fix, isolated: a CatalogEntry whose frontmatter
+    title: differs from its heading_title must be judged against
+    heading_title. A frontmatter-title comparison would wrongly flag this
+    as clean (export matches frontmatter title) when it should flag nothing
+    at all (export matches heading_title, which is what it is actually
+    derived from) -- and the reverse: a frontmatter-title comparison would
+    wrongly flag a note as mismatched when its heading_title agrees with
+    the export."""
+    path = PILOT_NOTE_PATHS[0]
+    entry = _catalog_entry(
+        path, title="Frontmatter Title", heading_title="Heading Text"
+    )
+    catalog = CatalogSnapshot(
+        entries=(entry,) + tuple(_catalog_entry(p) for p in PILOT_NOTE_PATHS[1:]),
+        index_revision="sha256:test",
+        bundle_commit=None,
+    )
+    entries = tuple(
+        ExportEntry(
+            zone="projects",
+            path=p,
+            title=("Heading Text" if p == path else "Title"),
+            status="active",
+        )
+        for p in PILOT_NOTE_PATHS
+    )
+    diffs, summary = diff_export_against_catalog(
+        entries,
+        catalog,
+        facts_by_path=_facts_all(),
+        export_commit="abc1234",
+        git_ops=NullGitOps(),
+    )
+    # Export title ("Heading Text") matches heading_title, not the
+    # (different) frontmatter title -- must be clean, not a mismatch.
+    assert summary["metadata_mismatch"] == 0
+    assert summary["matched_clean"] == 6
+
+
 def test_status_mismatch_is_reported_by_field_name() -> None:
     catalog = _full_catalog()
     mismatched_path = PILOT_NOTE_PATHS[1]
@@ -942,6 +1088,78 @@ def test_status_mismatch_is_reported_by_field_name() -> None:
     mismatch = next(d for d in diffs if d["category"] == "metadata_mismatch")
     assert mismatch["fields"] == ["status"]
     assert "deprecated" not in json.dumps(diffs)
+
+
+def test_development_candidates_status_compares_candidate_status_not_status() -> None:
+    """#48's other half: the development_candidates zone's export "status"
+    comes from frontmatter candidate_status:, not status: -- a note whose
+    plain status: disagrees with the export must NOT be flagged (status:
+    was never the export's source field for this zone) as long as its
+    candidate_status: (the field the export actually derives from) agrees."""
+    path = PILOT_NOTE_PATHS[0]
+    # status="inbox" would mismatch a naive status: comparison against the
+    # export's "needs-validation"; candidate_status="needs-validation"
+    # agrees with it and must be what is actually compared.
+    entry = _catalog_entry(path, status="inbox", candidate_status="needs-validation")
+    catalog = CatalogSnapshot(
+        entries=(entry,) + tuple(_catalog_entry(p) for p in PILOT_NOTE_PATHS[1:]),
+        index_revision="sha256:test",
+        bundle_commit=None,
+    )
+    entries = (
+        ExportEntry(
+            zone="development_candidates",
+            path=path,
+            title="Title",
+            status="needs-validation",
+        ),
+    ) + tuple(
+        ExportEntry(zone="projects", path=p, title="Title", status="active")
+        for p in PILOT_NOTE_PATHS[1:]
+    )
+    diffs, summary = diff_export_against_catalog(
+        entries,
+        catalog,
+        facts_by_path=_facts_all(),
+        export_commit="abc1234",
+        git_ops=NullGitOps(),
+    )
+    assert summary["metadata_mismatch"] == 0
+    assert summary["matched_clean"] == 6
+
+
+def test_development_candidates_status_flags_a_real_candidate_status_drift() -> None:
+    """The positive control for the test above: when candidate_status:
+    itself (not status:) disagrees with the export, it must be flagged."""
+    path = PILOT_NOTE_PATHS[0]
+    entry = _catalog_entry(path, status="active", candidate_status="in-development")
+    catalog = CatalogSnapshot(
+        entries=(entry,) + tuple(_catalog_entry(p) for p in PILOT_NOTE_PATHS[1:]),
+        index_revision="sha256:test",
+        bundle_commit=None,
+    )
+    entries = (
+        ExportEntry(
+            zone="development_candidates",
+            path=path,
+            title="Title",
+            status="needs-validation",
+        ),
+    ) + tuple(
+        ExportEntry(zone="projects", path=p, title="Title", status="active")
+        for p in PILOT_NOTE_PATHS[1:]
+    )
+    diffs, summary = diff_export_against_catalog(
+        entries,
+        catalog,
+        facts_by_path=_facts_all(),
+        export_commit="abc1234",
+        git_ops=NullGitOps(),
+    )
+    assert summary["metadata_mismatch"] == 1
+    mismatch = next(d for d in diffs if d["category"] == "metadata_mismatch")
+    assert mismatch["path"] == path
+    assert mismatch["fields"] == ["status"]
 
 
 def test_export_field_none_is_not_compared_not_a_mismatch() -> None:
@@ -1095,14 +1313,15 @@ def test_compared_true_end_to_end_against_synthetic_corpus(tmp_path) -> None:
     assert report["summary"]["metadata_mismatch_caveat"] is None
 
 
-def test_compared_true_with_metadata_mismatch_flags_report_as_unreliable(
+def test_compared_true_with_metadata_mismatch_is_reported_as_reliable(
     tmp_path,
 ) -> None:
-    """Round 4: #48 established every metadata_mismatch this module can
-    currently produce is a definitional false positive, not confirmed
-    drift. A downstream reader of the *report* (not this module's
-    docstring, #42's exact lesson) must see that unreliability as a field,
-    not have to know to distrust the number."""
+    """#48 fixed: both fields compared now share a definition on both
+    sides (title vs heading_title, zone-aware status vs candidate_status),
+    so a metadata_mismatch this module reports is real drift, not a
+    definitional false positive -- the report must say so via
+    metadata_mismatch_reliable, not require a downstream reader to
+    remember a caveat that no longer applies."""
     wiki_root = tmp_path / "wiki"
     manifest = _write_synthetic_pilot_corpus(wiki_root, title="Title", status="active")
     export_path = tmp_path / "wiki-export.v1.json"
@@ -1110,6 +1329,10 @@ def test_compared_true_with_metadata_mismatch_flags_report_as_unreliable(
         {"path": path, "title": "Title", "status": "active"}
         for path in PILOT_NOTE_PATHS
     ]
+    # _write_synthetic_pilot_corpus's notes all use heading == title
+    # ("Title") by default (_note()'s default), so this really is a
+    # heading_title/export disagreement -- genuine drift, not a
+    # definitional artifact.
     entries[0]["title"] = "A Totally Different Title"
     _write_export(export_path, zones={"projects": entries})
     config = load_config(env={"CKP_PILOT_WIKI_ROOT": str(wiki_root)})
@@ -1122,8 +1345,8 @@ def test_compared_true_with_metadata_mismatch_flags_report_as_unreliable(
     )
 
     assert report["summary"]["metadata_mismatch"] == 1
-    assert report["summary"]["metadata_mismatch_reliable"] is False
-    assert "#48" in report["summary"]["metadata_mismatch_caveat"]
+    assert report["summary"]["metadata_mismatch_reliable"] is True
+    assert report["summary"]["metadata_mismatch_caveat"] is None
 
 
 def test_compared_true_but_partial_coverage_reports_missing_with_reasons(

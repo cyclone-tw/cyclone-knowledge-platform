@@ -149,6 +149,74 @@ def test_every_entry_citation_is_bound_to_its_member_and_snapshot(
     assert host_home_prefix not in repr(entry.citation)
 
 
+def test_heading_title_and_frontmatter_title_are_independent_fields(
+    tmp_path: Path,
+) -> None:
+    """#48: benchmarks/export_compare.py compares export-derived titles
+    (every wiki-export.v1 zone sources "title" from the note's first
+    Markdown "# " heading, not frontmatter) against CatalogEntry.
+    heading_title, never CatalogEntry.title (the frontmatter title: field).
+    A note whose heading text and frontmatter title differ must expose both
+    correctly and independently -- this is the exact case that used to
+    produce a definitional false-positive metadata_mismatch."""
+    path = tmp_path / "diverging-title.md"
+    path.write_text(
+        "---\n"
+        "privacy: public\n"
+        "title: Frontmatter Title\n"
+        "type: Concept\n"
+        "status: stable\n"
+        "---\n\n# A Completely Different Heading\n\nbody\n",
+        encoding="utf-8",
+    )
+    cache, _, builder, _ = services(tmp_path)
+
+    entry = builder.build(cache.get()).entries[0]
+
+    assert entry.title == "Frontmatter Title"
+    assert entry.heading_title == "A Completely Different Heading"
+
+
+def test_heading_title_is_none_when_note_has_no_markdown_heading(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "no-heading.md"
+    path.write_text(
+        "---\nprivacy: public\ntitle: Has A Title\n---\n\n"
+        "body with no heading at all\n",
+        encoding="utf-8",
+    )
+    cache, _, builder, _ = services(tmp_path)
+
+    entry = builder.build(cache.get()).entries[0]
+
+    assert entry.title == "Has A Title"
+    assert entry.heading_title is None
+
+
+def test_candidate_status_is_read_independently_of_status(tmp_path: Path) -> None:
+    """#48's status half: development_candidates zone items export
+    "status" from frontmatter candidate_status:, a different field from
+    the plain status: frontmatter field projects/topics read. Both must be
+    exposed on CatalogEntry, independently."""
+    path = tmp_path / "candidate.md"
+    path.write_text(
+        "---\n"
+        "privacy: public\n"
+        "title: Candidate\n"
+        "status: inbox\n"
+        "candidate_status: needs-validation\n"
+        "---\n\n# Candidate\n\nbody\n",
+        encoding="utf-8",
+    )
+    cache, _, builder, _ = services(tmp_path)
+
+    entry = builder.build(cache.get()).entries[0]
+
+    assert entry.status == "inbox"
+    assert entry.candidate_status == "needs-validation"
+
+
 def test_public_catalog_omits_non_commit_provenance_from_citations(
     tmp_path: Path,
 ) -> None:

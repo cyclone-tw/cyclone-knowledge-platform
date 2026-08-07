@@ -89,23 +89,45 @@ A short SHA ambiguous between more than one commit in the checkout -- git
 itself detects this -- resolves to ``None``, same as an unknown ref;
 either one is ``"unknown"``, never a guessed pick among candidates.
 
-## Report reliability: metadata_mismatch is not currently trustworthy
+## Report reliability: metadata_mismatch, fixed (#48)
 
 #48 (filed from this PR's Round 2/3 findings) established that both
 metadata fields this module compares -- ``title`` (every zone) and
-``status`` (specifically the ``development_candidates`` zone) -- compare
-two fields that share a JSON key but not a definition on at least one real
-zone each. On today's real export, *every* ``metadata_mismatch`` this
-module currently produces is attributable to that definitional gap, not
-confirmed drift. A downstream reader (#30) must not be able to treat
-``metadata_mismatch`` as a real-drift signal until #48 lands: the report
-carries ``summary["metadata_mismatch_reliable"] = False`` whenever
-``metadata_mismatch`` is nonzero, plus
-``summary["metadata_mismatch_caveat"]`` pointing at #48 -- in the report
-itself, not only in this docstring (the exact #42 lesson: a docstring
-caveat a downstream report-only reader never opens is not a safeguard).
-When ``metadata_mismatch`` is zero the flag is ``True`` -- there is
-nothing unreliable to flag.
+``status`` (specifically the ``development_candidates`` zone) -- compared
+two fields that shared a JSON key but not a definition on at least one real
+zone each. That made every ``metadata_mismatch`` this module produced at
+the time attributable to the definitional gap, not confirmed drift.
+
+Fixed by having the Catalog side expose the *same* fields the export
+actually derives its values from, instead of a same-named-but-different
+frontmatter scalar:
+
+* ``title`` now compares the export's ``title`` (every zone derives it from
+  the note's first Markdown ``# `` heading -- ``wiki_dashboard_export.
+  first_heading_body`` / ``development_candidates.note_title``) against the
+  Catalog side's ``CatalogEntry.heading_title``
+  (``ckp.catalog.parser._heading_title``), which extracts the same first
+  ``# `` heading, not the frontmatter ``title:`` field. ``CatalogEntry.title``
+  (frontmatter ``title:``) is left untouched and does not participate in
+  this comparison.
+* ``status`` now resolves the Catalog-side reference field per zone: the
+  ``development_candidates`` zone's ``"status"`` is
+  ``frontmatter.get("candidate_status", "")``
+  (``development_candidates.candidate_record``), so that zone compares
+  against ``CatalogEntry.candidate_status`` (frontmatter ``candidate_status:``,
+  ``ckp.catalog.parser`` reads it directly). Every other zone
+  (``projects``, ``topics``) already read the plain frontmatter ``status:``
+  field on both sides, verified by reading the source functions (see "Known
+  limitations" below), so they keep comparing against
+  ``CatalogEntry.status``.
+
+With both fields now apples-to-apples, a ``metadata_mismatch`` this module
+reports is a real signal, not a false positive from a defined-differently
+same-named field, so ``summary["metadata_mismatch_reliable"]`` is always
+``True`` and ``summary["metadata_mismatch_caveat"]`` is always ``None`` --
+these two summary keys are kept (not removed) so a downstream reader (#30)
+that already checks them does not need a schema-shape change to learn the
+gap closed.
 
 ## Report body vs privacy (issue #29 privacy boundary)
 
@@ -117,7 +139,7 @@ content), git commit hashes (repository metadata, not note content), and
 metadata *field names* that disagree (``"title"``, ``"status"`` -- never
 the disagreeing strings themselves).
 
-## Known limitations carried over from Round 1/2, not yet fixed (tracked: #48)
+## Known limitations, fixed (tracked: #48, this module's fix)
 
 ``metadata_mismatch`` compares two fields per zone item (``title``,
 ``status``). Both were checked against their actual source in
@@ -125,41 +147,37 @@ the disagreeing strings themselves).
 because the JSON key matches (round 3 feedback, point 2: "不要留一個沒查過
 的欄位在比對裡"):
 
-* ``title`` -- **definitional mismatch, every zone.** Every
+* ``title`` -- **was a definitional mismatch, every zone; fixed.** Every
   ``wiki-export.v1`` zone derives ``title`` from the note's first Markdown
   ``# `` heading (``wiki_dashboard_export.first_heading_body`` /
-  ``development_candidates.note_title`` both do this), while this module's
-  Catalog side reads the frontmatter ``title:`` field
-  (``ckp.catalog.parser.project_member``). A note whose heading text and
-  frontmatter title differ shows as ``metadata_mismatch`` even against a
-  perfectly fresh export -- two different fields wearing the same name.
-* ``status`` -- **definitional mismatch in exactly one zone, checked
-  zone-by-zone, not assumed:**
+  ``development_candidates.note_title`` both do this). This module's
+  Catalog-side comparison now reads ``CatalogEntry.heading_title``
+  (``ckp.catalog.parser._heading_title``, the same first-``# ``-heading
+  extraction), not the frontmatter ``title:`` field
+  (``CatalogEntry.title``, which is left alone and does not participate in
+  this comparison).
+* ``status`` -- **was a definitional mismatch in exactly one zone, checked
+  zone-by-zone, not assumed; fixed:**
 
   * ``projects`` (``wiki_dashboard_export.active_projects``): its
     ``"status"`` is literally ``fm.get("status", "")`` -- the same
-    frontmatter ``status:`` field the Catalog side reads. Consistent;
-    verified by reading both source functions, not inferred from output.
+    frontmatter ``status:`` field the Catalog side reads
+    (``CatalogEntry.status``). Consistent; verified by reading both source
+    functions, not inferred from output. No change needed.
   * ``topics`` (``wiki_topics._child_entry``): its ``"status"`` is
-    ``_scalar(metadata, "status")`` -- also the same frontmatter field.
-    Consistent, same reasoning.
+    ``_scalar(metadata, "status")`` -- also the same frontmatter field
+    (``CatalogEntry.status``). Consistent, same reasoning. No change needed.
   * ``development_candidates`` (``development_candidates.candidate_record``):
     its ``"status"`` is ``frontmatter.get("candidate_status", "")`` -- a
-    **different** field (``candidate_status:``, not ``status:``). Both of
-    the two real pilot notes currently matched in the export live in this
-    zone, so this is not a theoretical gap: it is part of why today's real
-    run reports ``metadata_mismatch`` on both of them (their frontmatter
-    ``status: inbox`` will essentially never equal their
-    ``candidate_status:`` value).
+    **different** field (``candidate_status:``, not ``status:``). This
+    module now compares this zone's export ``"status"`` against
+    ``CatalogEntry.candidate_status`` (``ckp.catalog.parser`` reads
+    ``candidate_status:`` directly), not ``CatalogEntry.status``.
   * ``knowledge_feed`` (``wiki_dashboard_export.note_to_feed_item``) and
     ``life_domains`` never emit a ``"status"`` key at all -- ``ExportEntry.
     status`` is ``None`` for those, which this module already treats as
-    "not comparable" rather than a forced mismatch, so no gap there.
-
-Fixing either requires the Catalog side to expose the export's actual
-source field (an h1-derived title, and a zone-aware status source), which
-lives in ``src/ckp/`` (outside this issue's file ownership) -- flagged here
-and in #48 rather than silently producing a false positive category.
+    "not comparable" rather than a forced mismatch, so no gap there. No
+    change needed.
 """
 
 from __future__ import annotations
@@ -236,15 +254,14 @@ _NON_PATH_ZONES: tuple[str, ...] = ("shared_now", "agent_activity")
 
 _EXPECTED_SCHEMA = "wiki-export.v1"
 
-#: Round 4: named once so the report's caveat text and this module's own
-#: docstring cannot drift into two slightly different explanations of the
-#: same #48 finding.
-METADATA_MISMATCH_CAVEAT = (
-    "metadata_mismatch on 'title' (every zone) and 'status' (the "
-    "development_candidates zone) compares two fields that share a JSON "
-    "key but not a definition -- see cyclone-tw/cyclone-knowledge-platform#48. "
-    "Do not treat metadata_mismatch as a confirmed-drift signal until #48 lands."
-)
+#: Zone whose export ``"status"`` is sourced from frontmatter
+#: ``candidate_status:`` rather than plain ``status:``
+#: (``development_candidates.candidate_record``:
+#: ``frontmatter.get("candidate_status", "")`` -- verified by reading the
+#: source function, not inferred from output). Named explicitly so a status
+#: comparison for this zone is a visible, intentional branch rather than an
+#: unexplained special case (issue #48).
+_CANDIDATE_STATUS_ZONE = "development_candidates"
 
 _GIT_TIMEOUT_SECONDS = 5.0
 
@@ -1025,10 +1042,46 @@ def diff_export_against_catalog(
             clean = False
 
         mismatched_fields = []
-        if primary.title is not None and primary.title != catalog_entry.title:
+        # Both sides now read the same definition (issue #48): the export's
+        # title is every zone's first-Markdown-heading text
+        # (wiki_dashboard_export.first_heading_body /
+        # development_candidates.note_title), so the Catalog side compares
+        # against heading_title, never the frontmatter title: field.
+        #
+        # Codex round 1: the export's definition INCLUDES a fallback -- all
+        # three producers (wiki_dashboard_export.py, development_candidates.py,
+        # wiki_topics.py) fall back to path.stem when a note has no ATX H1
+        # (a setext heading counts as none on both sides). Mirroring the
+        # definition means mirroring the fallback, or every heading-less note
+        # is a false positive under a reliable=True banner.
+        comparable_heading = (
+            catalog_entry.heading_title
+            if catalog_entry.heading_title is not None
+            else PurePosixPath(pilot_path).stem
+        )
+        if primary.title is not None and primary.title != comparable_heading:
             mismatched_fields.append("title")
-        if primary.status is not None and primary.status != catalog_entry.status:
-            mismatched_fields.append("status")
+        # The export's "status" is sourced from a different frontmatter
+        # field depending on zone (issue #48): development_candidates reads
+        # candidate_status:, every other path-addressable zone reads
+        # status:. Compare against the matching Catalog-side field per zone.
+        reference_status = (
+            catalog_entry.candidate_status
+            if primary.zone == _CANDIDATE_STATUS_ZONE
+            else catalog_entry.status
+        )
+        # Codex round 1, same shape for status: the export emits "" when the
+        # source frontmatter field is missing, the Catalog says None. Both
+        # mean "absent from the same frontmatter", so they are normalised to
+        # None before comparing; absent-vs-value in either direction is real
+        # drift and still flags. Distinct from that: a zone that never
+        # carries status at all says None on the export side, and that keeps
+        # meaning "nothing to compare", not "absent field".
+        if primary.status is not None:
+            export_status = primary.status if primary.status != "" else None
+            catalog_status = reference_status if reference_status != "" else None
+            if export_status != catalog_status:
+                mismatched_fields.append("status")
         if mismatched_fields:
             diffs.append(
                 {
@@ -1047,18 +1100,18 @@ def diff_export_against_catalog(
     summary = {
         "pilot_scope_count": len(PILOT_NOTE_PATHS),
         **counts,
-        # Round 4: #48 established that every metadata_mismatch this module
-        # can currently produce is attributable to two fields sharing a
-        # JSON key but not a definition on at least one real zone each
-        # ("title" on every zone, "status" on development_candidates) --
-        # not confirmed drift. This must live in the report a downstream
-        # reader (#30) actually consumes, not only in the module docstring
-        # (#42's lesson: a docstring caveat nobody reading the report ever
-        # opens is not a safeguard).
-        "metadata_mismatch_reliable": counts["metadata_mismatch"] == 0,
-        "metadata_mismatch_caveat": (
-            METADATA_MISMATCH_CAVEAT if counts["metadata_mismatch"] else None
-        ),
+        # #48 fixed the definitional gap that used to make every
+        # metadata_mismatch untrustworthy (title compared frontmatter
+        # title: against an export value derived from the first heading;
+        # development_candidates' status compared status: against an export
+        # value derived from candidate_status:). Both sides now read the
+        # same source field per the docstring's "Report reliability"
+        # section, so any metadata_mismatch this module reports is a real
+        # signal -- always True/None, kept as report fields (not removed)
+        # so a downstream reader (#30) that already checks them sees the
+        # gap closed without a schema-shape change.
+        "metadata_mismatch_reliable": True,
+        "metadata_mismatch_caveat": None,
     }
     return diffs, summary
 
@@ -1165,7 +1218,6 @@ if __name__ == "__main__":
 
 __all__ = [
     "EXPORT_PATH_ENV",
-    "METADATA_MISMATCH_CAVEAT",
     "PATH_ADDRESSABLE_ZONES",
     "REPORT_SCHEMA",
     "CurrentExport",
