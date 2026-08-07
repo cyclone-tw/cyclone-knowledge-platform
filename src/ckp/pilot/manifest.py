@@ -114,8 +114,10 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset({"note"})
 #: BEFORE any echo: a 64-hex string cannot carry a payload, and a bounded
 #: path-shaped string cannot carry a note body. Anything format-invalid is
 #: refused *without being repeated*.
-_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
-_RELATIVE_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,300}$")
+# fullmatch() below, not match()+anchors: a Python `$` also matches just
+# before a trailing newline, so "hash\n" would have slipped through.
+_SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
+_RELATIVE_PATH_RE = re.compile(r"[A-Za-z0-9._/-]{1,300}")
 
 
 @dataclass(frozen=True)
@@ -260,7 +262,7 @@ def load_frozen_manifest(config: Config) -> PilotManifest:
                     "non-string value is a place to smuggle content, and its "
                     "contents are deliberately not repeated here"
                 )
-            if not pattern.match(value):
+            if not pattern.fullmatch(value):
                 raise PilotBindingError(
                     f"{manifest_path}: [[note]] #{index} field {field_name!r} "
                     f"is not {shape} -- a free-form string is a place to "

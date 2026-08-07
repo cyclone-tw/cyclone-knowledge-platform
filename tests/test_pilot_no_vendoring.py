@@ -94,8 +94,17 @@ def test_load_frozen_manifest_rejects_paths_that_drift_from_the_allowlist(
         ("content_sha256", "f" * 63, None),
         ("relative_path", "LEAKED\nnote body\nwith newlines", "LEAKED"),
         ("relative_path", "x" * 301, None),
+        ("content_sha256", "f" * 64 + "\n", None),
+        ("relative_path", "Core/AGENTS.md\n", None),
     ],
-    ids=["sha-freeform", "sha-63-hex", "path-newlines", "path-overlong"],
+    ids=[
+        "sha-freeform",
+        "sha-63-hex",
+        "path-newlines",
+        "path-overlong",
+        "sha-trailing-newline",
+        "path-trailing-newline",
+    ],
 )
 def test_format_invalid_string_values_are_refused_without_echo(
     tmp_path, field: str, value: str, marker: str | None
