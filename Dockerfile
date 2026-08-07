@@ -21,6 +21,11 @@ COPY pyproject.toml README.md ./
 COPY src/ ./src/
 COPY fixtures/ ./fixtures/
 
+# P1 pilot corpus binding (issue #23) is benchmark-support tooling over the
+# real Wiki checkout, not part of the served API -- it never ships in the
+# runtime image.
+RUN rm -rf ./src/ckp/pilot
+
 RUN python -m pip install --no-cache-dir --disable-pip-version-check .
 
 RUN if [ -n "$BUNDLE_COMMIT" ]; then \

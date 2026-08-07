@@ -22,3 +22,13 @@ note_glob = "**/*.md"
 [server]
 host = "127.0.0.1"
 port = 8080
+
+[pilot]
+# P1 pilot corpus binding (issue #23): a read-only manifest over the *real*
+# Cyclone-Wiki checkout, never a fixture. Empty `wiki_root` means "not
+# configured" -- binding fails loudly (D5), it never falls back to a default
+# or silently skips. Set via CKP_PILOT_WIKI_ROOT, never a literal host path
+# in tracked source (AGENTS.md §7).
+wiki_root = ""
+# Relative to the process working directory, same convention as bundle.root.
+manifest_path = "config/pilot-manifest.toml"
