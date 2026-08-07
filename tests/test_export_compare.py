@@ -159,22 +159,37 @@ def _write_export(
 
 
 class _FakeGitOps:
-    """Deterministic stand-in for git, for pure classification tests."""
+    """Deterministic stand-in for git, for pure classification tests.
+
+    ``resolve`` defaults to identity (``resolve_commit(x) == x``) so every
+    pre-round-4 fake-based test keeps working unchanged: those tests use
+    arbitrary distinct strings ("oldcommit", "newcommit", ...), and
+    resolving each string to itself is a no-op for them. Tests that
+    specifically exercise resolution -- abbreviated-vs-full identity,
+    ambiguity, unknown refs -- pass an explicit ``resolve`` mapping.
+    """
 
     def __init__(
         self,
         *,
         last_touch: dict[str, str] | None = None,
         ancestry: dict[tuple[str, str], bool] | None = None,
+        resolve: dict[str, str | None] | None = None,
     ) -> None:
         self._last_touch = last_touch or {}
         self._ancestry = ancestry or {}
+        self._resolve = resolve
 
     def last_touch_commit(self, relative_path: str) -> str | None:
         return self._last_touch.get(relative_path)
 
     def is_ancestor(self, ancestor: str, descendant: str) -> bool | None:
         return self._ancestry.get((ancestor, descendant))
+
+    def resolve_commit(self, ref: str) -> str | None:
+        if self._resolve is None:
+            return ref
+        return self._resolve.get(ref)
 
 
 def _git(*args: str, cwd) -> None:
@@ -418,6 +433,49 @@ def test_subprocess_git_ops_against_a_real_temporary_repo(tmp_path) -> None:
     assert freshness_verdict(git_ops, second_commit, "Core/a.md") == "current"
 
 
+def test_resolve_commit_default_is_identity_for_fake_git_ops() -> None:
+    assert _FakeGitOps().resolve_commit("anything") == "anything"
+
+
+def test_freshness_unknown_when_export_commit_does_not_resolve() -> None:
+    """An export commit that resolve_commit cannot find (bad ref, or
+    ambiguous short SHA -- git itself detects ambiguity, this module never
+    picks a candidate) must be unknown, not fall through to a string
+    comparison or an ancestry check with garbage input."""
+    git_ops = _FakeGitOps(
+        last_touch={"Core/x.md": "full-commit"},
+        resolve={"full-commit": "full-commit"},  # export_commit not in this map -> None
+    )
+    assert freshness_verdict(git_ops, "unresolvable-ref", "Core/x.md") == "unknown"
+
+
+def test_freshness_unknown_when_last_touch_does_not_resolve() -> None:
+    git_ops = _FakeGitOps(
+        last_touch={"Core/x.md": "unresolvable-touch"},
+        resolve={
+            "export-commit": "export-commit"
+        },  # last_touch not in this map -> None
+    )
+    assert freshness_verdict(git_ops, "export-commit", "Core/x.md") == "unknown"
+
+
+def test_freshness_current_when_abbreviated_and_full_sha_resolve_to_same_commit() -> (
+    None
+):
+    """The exact round 4 bug, reproduced with a fake: export_commit is an
+    abbreviated form and last_touch is the full form of the *same* commit
+    -- the two strings never match directly, but both resolve to one
+    canonical form."""
+    git_ops = _FakeGitOps(
+        last_touch={"Core/x.md": "abc1234full567890"},
+        resolve={
+            "abc1234": "abc1234full567890",  # export_commit, abbreviated
+            "abc1234full567890": "abc1234full567890",  # last_touch, already full
+        },
+    )
+    assert freshness_verdict(git_ops, "abc1234", "Core/x.md") == "current"
+
+
 def test_subprocess_git_ops_diverged_history_is_unknown_not_current(tmp_path) -> None:
     """Round 3 blocking finding: a single ``is_ancestor(export, note)``
     call returning False used to be read as "current". Real diverged
@@ -498,12 +556,75 @@ def test_freshness_unknown_when_one_direction_is_none_even_if_other_is_false() -
     assert freshness_verdict(git_ops, "commit-a", "Core/x.md") == "unknown"
 
 
+def test_subprocess_git_ops_resolves_abbreviated_and_full_sha_to_the_same_commit(
+    tmp_path,
+) -> None:
+    """Round 4 blocking finding, reproduced against real git, the same way
+    the diverged-history test above reproduces round 3's: this is exactly
+    the shape of the bug Codex caught -- the export producer
+    (wiki_dashboard_export.py) writes `git rev-parse --short HEAD` while
+    this module's own last_touch_commit() always returns the full SHA."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git("init", "-q", cwd=repo)
+    _git("config", "user.email", "test@example.com", cwd=repo)
+    _git("config", "user.name", "Test", cwd=repo)
+
+    (repo / "Core").mkdir()
+    (repo / "Core" / "a.md").write_text("v1\n", encoding="utf-8")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "only commit", cwd=repo)
+
+    full_commit = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    short_commit = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--short", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert short_commit != full_commit  # the whole premise of the bug
+
+    git_ops = SubprocessGitOps(wiki_root=repo)
+    assert git_ops.resolve_commit(full_commit) == full_commit
+    assert git_ops.resolve_commit(short_commit) == full_commit
+    assert git_ops.last_touch_commit("Core/a.md") == full_commit
+
+    # export_commit is the *abbreviated* form -- exactly what
+    # wiki_dashboard_export.py writes -- for the very commit that last
+    # touched Core/a.md. Before the round 4 fix this fell through the
+    # string-equality shortcut, hit is_ancestor(X, X) both ways (True,
+    # True -- a commit is trivially its own ancestor), and was refused
+    # into "unknown". It must be "current".
+    assert freshness_verdict(git_ops, short_commit, "Core/a.md") == "current"
+
+
+def test_subprocess_git_ops_resolve_commit_unknown_ref_is_none(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git("init", "-q", cwd=repo)
+    _git("config", "user.email", "test@example.com", cwd=repo)
+    _git("config", "user.name", "Test", cwd=repo)
+    (repo / "a.md").write_text("v1\n", encoding="utf-8")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "only commit", cwd=repo)
+
+    git_ops = SubprocessGitOps(wiki_root=repo)
+    assert git_ops.resolve_commit("not-a-real-commit") is None
+    assert git_ops.resolve_commit("deadbeef") is None
+
+
 def test_subprocess_git_ops_on_a_non_git_directory_is_unknown_not_a_crash(
     tmp_path,
 ) -> None:
     git_ops = SubprocessGitOps(wiki_root=tmp_path)
     assert git_ops.last_touch_commit("Core/a.md") is None
     assert git_ops.is_ancestor("a", "b") is None
+    assert git_ops.resolve_commit("a") is None
 
 
 # --- diff_export_against_catalog: pure classification ----------------------
@@ -908,10 +1029,15 @@ def test_summary_has_all_categories_as_distinct_keys() -> None:
         "missing_from_export_unknown",
         "extra_in_export",
         "metadata_mismatch",
+        "metadata_mismatch_reliable",
+        "metadata_mismatch_caveat",
         "path_mismatch",
         "matched_clean",
     }
     assert summary["missing_from_export"] == 6
+    # No mismatches in this fixture -> nothing to flag as unreliable.
+    assert summary["metadata_mismatch_reliable"] is True
+    assert summary["metadata_mismatch_caveat"] is None
 
 
 # --- compare_export_to_catalog: end-to-end wiring --------------------------
@@ -965,6 +1091,39 @@ def test_compared_true_end_to_end_against_synthetic_corpus(tmp_path) -> None:
     assert report["diffs"] == []
     assert report["summary"]["matched_clean"] == 6
     assert report["catalog"]["entry_count"] == 6
+    assert report["summary"]["metadata_mismatch_reliable"] is True
+    assert report["summary"]["metadata_mismatch_caveat"] is None
+
+
+def test_compared_true_with_metadata_mismatch_flags_report_as_unreliable(
+    tmp_path,
+) -> None:
+    """Round 4: #48 established every metadata_mismatch this module can
+    currently produce is a definitional false positive, not confirmed
+    drift. A downstream reader of the *report* (not this module's
+    docstring, #42's exact lesson) must see that unreliability as a field,
+    not have to know to distrust the number."""
+    wiki_root = tmp_path / "wiki"
+    manifest = _write_synthetic_pilot_corpus(wiki_root, title="Title", status="active")
+    export_path = tmp_path / "wiki-export.v1.json"
+    entries = [
+        {"path": path, "title": "Title", "status": "active"}
+        for path in PILOT_NOTE_PATHS
+    ]
+    entries[0]["title"] = "A Totally Different Title"
+    _write_export(export_path, zones={"projects": entries})
+    config = load_config(env={"CKP_PILOT_WIKI_ROOT": str(wiki_root)})
+
+    report = compare_export_to_catalog(
+        config,
+        export_path=export_path,
+        frozen_manifest=manifest,
+        git_ops=NullGitOps(),
+    )
+
+    assert report["summary"]["metadata_mismatch"] == 1
+    assert report["summary"]["metadata_mismatch_reliable"] is False
+    assert "#48" in report["summary"]["metadata_mismatch_caveat"]
 
 
 def test_compared_true_but_partial_coverage_reports_missing_with_reasons(

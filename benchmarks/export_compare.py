@@ -69,6 +69,44 @@ unambiguously ``False``; every other combination (both ``False`` --
 diverged; either ``None`` -- undeterminable; both ``True`` -- impossible in
 a real DAG, refused rather than trusted) is ``"unknown"``.
 
+## Round 4: commit identity must be resolved, not string-compared
+
+Round 3's bidirectional check was logically sound but its short-circuit
+(``last_touch == export_commit`` -> ``"current"``) compared raw strings.
+The export producer writes an *abbreviated* SHA
+(``wiki_dashboard_export.py``'s ``git_commit()``: ``git rev-parse --short
+HEAD``); :meth:`GitOps.last_touch_commit` always returns a *full* SHA. For
+the export's own commit those two strings never matched, so the identity
+check never fired -- the flow fell through to the ancestry check, where a
+commit is trivially its own ancestor in both directions, and the "both
+True is impossible, refuse" branch turned a genuinely current note into
+``"unknown"``. Codex reproduced this against a real short-SHA/full-SHA
+pair from the live checkout.
+
+Both sides now go through :meth:`GitOps.resolve_commit`
+(``git rev-parse --verify --quiet <ref>^{commit}``) before any comparison.
+A short SHA ambiguous between more than one commit in the checkout -- git
+itself detects this -- resolves to ``None``, same as an unknown ref;
+either one is ``"unknown"``, never a guessed pick among candidates.
+
+## Report reliability: metadata_mismatch is not currently trustworthy
+
+#48 (filed from this PR's Round 2/3 findings) established that both
+metadata fields this module compares -- ``title`` (every zone) and
+``status`` (specifically the ``development_candidates`` zone) -- compare
+two fields that share a JSON key but not a definition on at least one real
+zone each. On today's real export, *every* ``metadata_mismatch`` this
+module currently produces is attributable to that definitional gap, not
+confirmed drift. A downstream reader (#30) must not be able to treat
+``metadata_mismatch`` as a real-drift signal until #48 lands: the report
+carries ``summary["metadata_mismatch_reliable"] = False`` whenever
+``metadata_mismatch`` is nonzero, plus
+``summary["metadata_mismatch_caveat"]`` pointing at #48 -- in the report
+itself, not only in this docstring (the exact #42 lesson: a docstring
+caveat a downstream report-only reader never opens is not a safeguard).
+When ``metadata_mismatch`` is zero the flag is ``True`` -- there is
+nothing unreliable to flag.
+
 ## Report body vs privacy (issue #29 privacy boundary)
 
 The diff report never carries note bodies, excerpts, or metadata *values*
@@ -155,7 +193,7 @@ from ckp.pilot.manifest import (
 )
 from ckp.privacy import FrontmatterClassifier, PrivacyClass, PrivacyGate
 
-REPORT_SCHEMA = "ckp-export-compare-report/3"
+REPORT_SCHEMA = "ckp-export-compare-report/4"
 
 #: Override for where the "current export" lives. Unset means "derive from
 #: the pilot Wiki checkout root", mirroring how Cyclone-Dashboard's own
@@ -197,6 +235,16 @@ PATH_ADDRESSABLE_ZONES: tuple[str, ...] = (
 _NON_PATH_ZONES: tuple[str, ...] = ("shared_now", "agent_activity")
 
 _EXPECTED_SCHEMA = "wiki-export.v1"
+
+#: Round 4: named once so the report's caveat text and this module's own
+#: docstring cannot drift into two slightly different explanations of the
+#: same #48 finding.
+METADATA_MISMATCH_CAVEAT = (
+    "metadata_mismatch on 'title' (every zone) and 'status' (the "
+    "development_candidates zone) compares two fields that share a JSON "
+    "key but not a definition -- see cyclone-tw/cyclone-knowledge-platform#48. "
+    "Do not treat metadata_mismatch as a confirmed-drift signal until #48 lands."
+)
 
 _GIT_TIMEOUT_SECONDS = 5.0
 
@@ -521,7 +569,7 @@ def extract_note_frontmatter_facts(member: BundleMember) -> NoteFrontmatterFacts
 
 
 class GitOps(Protocol):
-    """Two git-metadata-only queries against the pilot Wiki checkout.
+    """Three git-metadata-only queries against the pilot Wiki checkout.
 
     Injectable so :func:`freshness_verdict` and its callers are testable
     without a real git repository -- production wiring always uses
@@ -532,6 +580,26 @@ class GitOps(Protocol):
 
     def is_ancestor(self, ancestor: str, descendant: str) -> bool | None: ...
 
+    def resolve_commit(self, ref: str) -> str | None:
+        """Canonicalize any commit-ish (full SHA, abbreviated SHA, or any
+        other git revision expression) to one full SHA, or ``None`` if it
+        cannot be resolved to *exactly one* commit (unknown ref, or a short
+        SHA ambiguous between more than one commit in this checkout).
+
+        Round 4 fix (Codex-caught): the export producer
+        (``wiki_dashboard_export.py``'s ``git_commit()``) writes
+        ``git rev-parse --short HEAD`` -- an *abbreviated* SHA -- while
+        :meth:`last_touch_commit` returns a *full* SHA. A prior version of
+        :func:`freshness_verdict` compared those two strings directly; for
+        the export's own commit they never matched, so the same commit fell
+        through to the ancestry check, where a commit is trivially its own
+        ancestor in both directions -- the exact "both True, refuse" branch
+        misfired into ``"unknown"`` for a commit the report should have
+        called ``"current"``. Every commit identity comparison in this
+        module must go through this method first.
+        """
+        ...
+
 
 class NullGitOps:
     """Every query answers "unknown". Freshness always comes back
@@ -541,6 +609,9 @@ class NullGitOps:
         return None
 
     def is_ancestor(self, ancestor: str, descendant: str) -> bool | None:
+        return None
+
+    def resolve_commit(self, ref: str) -> str | None:
         return None
 
 
@@ -607,6 +678,50 @@ class SubprocessGitOps:
         # -- an honest "unknown", never coerced into True or False.
         return None
 
+    def resolve_commit(self, ref: str) -> str | None:
+        """``git rev-parse --verify --quiet <ref>^{commit}``.
+
+        ``^{commit}`` peels any tag/ref down to a commit object (refuses a
+        non-commit rather than silently accepting one); ``--verify
+        --quiet`` makes both "no such revision" and "ambiguous short SHA"
+        come back as a plain non-zero exit with empty stdout, not an
+        exception or a printed candidate list -- confirmed empirically
+        against a real short-SHA collision found in the live
+        cyclone-wiki checkout (two commits both matching prefix ``22ad``):
+        ``git rev-parse --verify --quiet 22ad^{commit}`` exits 1 with no
+        stdout, exactly like an unknown ref. Either way this method
+        returns ``None`` -- it never guesses one candidate out of an
+        ambiguous set (round 4 feedback, point 2).
+        """
+        try:
+            result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(self.wiki_root),
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    f"{ref}^{{commit}}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=_GIT_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        # Defense in depth: --verify --quiet has never been observed to
+        # print more than one line for either a clean resolution or an
+        # ambiguous one (ambiguity comes back as empty stdout + rc=1
+        # instead), but a single resolved line is the only shape this
+        # method trusts.
+        if len(lines) != 1:
+            return None
+        return lines[0].strip()
+
 
 def freshness_verdict(
     git_ops: GitOps, export_commit: str | None, relative_path: str
@@ -632,17 +747,35 @@ def freshness_verdict(
     they disagree unambiguously; everything else -- including the
     impossible-in-a-real-DAG case of both directions reporting ``True`` --
     is ``"unknown"`` rather than trusted.
+
+    Round 4 fix: commit identity is never compared as raw strings anymore.
+    ``export_commit`` (an abbreviated SHA in every real export --
+    ``wiki_dashboard_export.py``'s ``git_commit()`` calls
+    ``git rev-parse --short HEAD``) and ``last_touch`` (always a full SHA,
+    from :meth:`GitOps.last_touch_commit`) are both run through
+    :meth:`GitOps.resolve_commit` first, so "same commit, different string
+    form" is recognized as ``"current"`` instead of falling through to the
+    ancestry check, where a commit is trivially its own ancestor in both
+    directions and used to get refused into ``"unknown"``. Either
+    resolution failing (unknown ref, or an ambiguous short SHA -- point 2
+    of the same feedback) is ``"unknown"``, never a guess at which
+    candidate was meant.
     """
     if not export_commit:
         return "unknown"
     last_touch = git_ops.last_touch_commit(relative_path)
     if not last_touch:
         return "unknown"
-    if last_touch == export_commit:
+
+    resolved_export = git_ops.resolve_commit(export_commit)
+    resolved_last_touch = git_ops.resolve_commit(last_touch)
+    if resolved_export is None or resolved_last_touch is None:
+        return "unknown"
+    if resolved_export == resolved_last_touch:
         return "current"
 
-    export_predates_note = git_ops.is_ancestor(export_commit, last_touch)
-    note_predates_export = git_ops.is_ancestor(last_touch, export_commit)
+    export_predates_note = git_ops.is_ancestor(resolved_export, resolved_last_touch)
+    note_predates_export = git_ops.is_ancestor(resolved_last_touch, resolved_export)
 
     if export_predates_note is True and note_predates_export is False:
         return "stale"
@@ -914,6 +1047,18 @@ def diff_export_against_catalog(
     summary = {
         "pilot_scope_count": len(PILOT_NOTE_PATHS),
         **counts,
+        # Round 4: #48 established that every metadata_mismatch this module
+        # can currently produce is attributable to two fields sharing a
+        # JSON key but not a definition on at least one real zone each
+        # ("title" on every zone, "status" on development_candidates) --
+        # not confirmed drift. This must live in the report a downstream
+        # reader (#30) actually consumes, not only in the module docstring
+        # (#42's lesson: a docstring caveat nobody reading the report ever
+        # opens is not a safeguard).
+        "metadata_mismatch_reliable": counts["metadata_mismatch"] == 0,
+        "metadata_mismatch_caveat": (
+            METADATA_MISMATCH_CAVEAT if counts["metadata_mismatch"] else None
+        ),
     }
     return diffs, summary
 
@@ -1020,6 +1165,7 @@ if __name__ == "__main__":
 
 __all__ = [
     "EXPORT_PATH_ENV",
+    "METADATA_MISMATCH_CAVEAT",
     "PATH_ADDRESSABLE_ZONES",
     "REPORT_SCHEMA",
     "CurrentExport",
