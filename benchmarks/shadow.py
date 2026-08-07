@@ -108,6 +108,19 @@ Privacy is zero-tolerance: a single non-public path in either engine's
 output makes ``privacy_false_negatives`` non-zero, and the test suite treats
 that as a hard failure (contract §5.3: false-negative exposure is
 intolerable).
+
+**QMD baseline (issue #24, Epic #21 D3 frozen)**: an optional third engine,
+distinct from ``lexical`` (the platform's own catalog search -- still what
+that field name means, unchanged by this addition). When the caller passes
+``qmd_config``, every question is also run against the real ``qmd`` CLI,
+scoped to ``qmd_config.corpus_paths`` (D3: comparing recall against two
+different denominators is meaningless). ``report["qmd_compared"]`` is
+``True`` only if every question's QMD call succeeded; the moment any call
+raises ``QmdUnavailable``, the *entire* QMD dimension is discarded from the
+report -- no partial results, no silent fallback to ``lexical`` standing in
+for it (D3: "跑不了就整份失敗"). ``qmd_config=None`` (the default) means "no
+QMD comparison was attempted", reported the same way as a mid-run failure:
+``qmd_compared: False``.
 """
 
 from __future__ import annotations
@@ -115,6 +128,12 @@ from __future__ import annotations
 import math
 import time
 
+from benchmarks.qmd.adapter import (
+    QmdBaselineConfig,
+    QmdUnavailable,
+    qmd_token_cost,
+    run_qmd_query,
+)
 from benchmarks.questions import (
     CORPUS_BODIES,
     CORPUS_VERSION,
@@ -145,6 +164,50 @@ REPORT_SCHEMA = "ckp-shadow-report/3"
 TOKEN_COST_METHOD = "whitespace-proxy"
 TOKEN_COST_NOTE = (
     "token counts are a whitespace-split proxy, not a model tokenizer count"
+)
+
+#: D1's token-cost threshold ("context token 總量 不高於 QMD baseline") needs
+#: a QMD-side number to compare against, so unlike stale-exclusion below,
+#: this is not optional -- ``qmd_token_cost`` reuses the exact same
+#: whitespace-proxy method as the lexical/vector sides (``TOKEN_COST_METHOD``
+#: above), just applied to real note bytes read transiently from
+#: ``qmd_config.wiki_root`` and immediately discarded (RP1: the rule is
+#: "content never enters this repo", not "content is never read in memory" --
+#: the same reasoning ``ckp.pilot.manifest`` already relies on for hashing).
+
+#: D2's "known coverage gap": the real pilot corpus (#23's six notes) has no
+#: ``superseded`` relationship to measure, so QMD-side stale exclusion is
+#: structurally not-applicable, not merely unmeasured. Reported as an
+#: explicit note rather than a numeric field so a gate reading this report
+#: (#30) cannot mistake an absent key for a zero or a bug.
+QMD_STALE_EXCLUSION_NOTE = (
+    "QMD side has no stale-exclusion metric: it depends on the corpus's "
+    "`superseded` marker, and the real pilot corpus (Epic #21 D2) carries no "
+    "superseded relationship to measure -- a known coverage gap recorded in "
+    "D2, not a bug in this report."
+)
+
+#: Codex Round 1 (#24 review) found a second entry point for the same shape
+#: this whole issue exists to close: a non-empty ``corpus_paths`` that
+#: happens to share *no* path with anything QMD actually returns (every
+#: path mistyped, or pointed at files the named index does not have)
+#: produces the identical "qmd_compared: true, qmd_hit_rate: 0.0" report an
+#: empty scope would have -- indistinguishable from "QMD was compared and
+#: performed badly" unless flagged separately. ``qmd_scope_overlap`` is the
+#: flag: ``True`` once any raw QMD hit anywhere in the run fell inside the
+#: configured scope, ``False`` if QMD returned real hits but never once one
+#: that matched the scope (a config smell, not a quality signal), ``None``
+#: when QMD was never compared or never returned a raw hit at all (in which
+#: case a scope mismatch cannot be told apart from a genuine "nothing
+#: found").
+QMD_SCOPE_OVERLAP_NOTE = (
+    "true: at least one raw QMD hit somewhere in this run fell inside "
+    "corpus_paths. false: QMD returned real hits but none of them, in the "
+    "whole run, ever matched corpus_paths -- read this as a likely scope or "
+    "path configuration error, not as a retrieval-quality result (Codex "
+    "Round 1 finding). null: QMD was not compared, or never returned any "
+    "raw hit at all, so a scope mismatch cannot be distinguished from a "
+    "genuine 'nothing found' answer."
 )
 
 #: Default per-question, per-engine repeat count for the latency sample.
@@ -288,6 +351,7 @@ def run_shadow_benchmark(
     questions: tuple[BenchmarkQuestion, ...],
     index_admissible: frozenset[PrivacyClass] = _PUBLIC_ONLY,
     trials: int = DEFAULT_LATENCY_TRIALS,
+    qmd_config: QmdBaselineConfig | None = None,
 ) -> dict:
     """Rebuild, query both engines, and assemble the deterministic report.
 
@@ -333,6 +397,14 @@ def run_shadow_benchmark(
     ``DEFAULT_LATENCY_TRIALS``); it does not change correctness, hit,
     token-cost, citation, or stale-exclusion accounting, which are all
     computed once per question from the first trial's results.
+
+    ``qmd_config`` (issue #24) opts into the real QMD baseline: when given,
+    every question also runs once against the ``qmd`` CLI (never repeated
+    for ``trials`` -- a slow external subprocess is not worth hammering
+    purely for a latency sample), scoped to ``qmd_config.corpus_paths``. Any
+    failure discards the whole QMD dimension (``qmd_compared: False``,
+    every question's ``"qmd"`` field reset to ``None``) rather than mixing
+    partial results with a report that otherwise looks complete.
 
     Two accounting caveats, documented rather than fixed here (behavior is
     frozen; see the module docstring for the full explanation):
@@ -408,6 +480,22 @@ def run_shadow_benchmark(
     lexical_trial_samples: list[float] = []
     vector_trial_samples: list[float] = []
 
+    #: QMD baseline (issue #24). ``qmd_compared`` starts True only if a
+    #: config was actually supplied, and flips to False for good the first
+    #: time a call fails -- once False, no further qmd calls are attempted
+    #: (D3: fail loud, no partial mixing) and every previously collected
+    #: question-level qmd block is discarded in the post-loop cleanup below.
+    qmd_compared = qmd_config is not None
+    qmd_unavailable_reason: str | None = None
+    qmd_hits = 0
+    qmd_scored = 0
+    qmd_tokens_total = 0
+    qmd_trial_samples: list[float] = []
+    #: Codex Round 1 diagnostic (see ``QMD_SCOPE_OVERLAP_NOTE``): counts
+    #: across the whole run, independent of any single question's hit/miss.
+    qmd_questions_with_raw_hits = 0
+    qmd_questions_with_scoped_hits = 0
+
     # Per-provenance tallies (issue #26): the same counters as above, kept
     # separately per ``question.provenance`` so a mixed report can never
     # present one pooled number that quietly blends a real and a synthetic
@@ -469,6 +557,48 @@ def run_shadow_benchmark(
                 repeat_vector, top_k=top_k, filter_privacy=_PUBLIC_ONLY
             )
             vector_trial_samples.append(time.perf_counter() - started)
+
+        # QMD baseline (issue #24): one call per question, never repeated
+        # for ``trials``. A failure here flips ``qmd_compared`` False for
+        # the rest of the run and every already-collected qmd block is
+        # discarded after the loop (D3: no partial comparison survives).
+        qmd_block: dict | None = None
+        if qmd_compared:
+            try:
+                started = time.perf_counter()
+                qmd_result = run_qmd_query(
+                    question.query, config=qmd_config, top_k=top_k
+                )
+                qmd_trial_samples.append(time.perf_counter() - started)
+            except QmdUnavailable as exc:
+                qmd_compared = False
+                qmd_unavailable_reason = str(exc)
+            else:
+                qmd_hit = _hit(question.expected_paths, qmd_result.paths)
+                if question.expected_paths:
+                    qmd_scored += 1
+                    qmd_hits += 1 if qmd_hit else 0
+                # Codex Round 1 diagnostic: track whether QMD ever returned
+                # anything at all, separately from whether any of it landed
+                # inside the configured scope (``QMD_SCOPE_OVERLAP_NOTE``).
+                if qmd_result.raw_paths:
+                    qmd_questions_with_raw_hits += 1
+                if qmd_result.paths:
+                    qmd_questions_with_scoped_hits += 1
+                # D1's token-cost threshold needs this number; reads real
+                # bytes transiently and discards them (see the module-level
+                # note above ``QMD_STALE_EXCLUSION_NOTE``).
+                qmd_cost = qmd_token_cost(
+                    qmd_result.paths, wiki_root=qmd_config.wiki_root
+                )
+                qmd_tokens_total += qmd_cost
+                qmd_block = {
+                    "paths": list(qmd_result.paths),
+                    "hit": qmd_hit,
+                    "result_count": len(qmd_result.paths),
+                    "token_cost": qmd_cost,
+                    "raw_result_count": len(qmd_result.raw_paths),
+                }
 
         # Leaked paths are counted and then *redacted*: a violating path must
         # never travel onward inside the report it violated (R1 review).
@@ -577,10 +707,39 @@ def run_shadow_benchmark(
                     "token_cost_measured": vector_measured,
                     "stale_returned": vector_stale_returned,
                 },
+                "qmd": qmd_block,
             }
         )
 
     total_questions = len(questions)
+
+    # D3 "跑不了就整份失敗": a mid-run QMD failure must not leave earlier
+    # questions carrying a qmd block while later ones carry None -- that
+    # partial shape would look like "mostly compared" instead of the
+    # honest "not compared" the acceptance criteria require. Once
+    # ``qmd_compared`` is False for any reason (never configured, or failed
+    # partway), every question's qmd block and every qmd summary number is
+    # reset together.
+    if not qmd_compared:
+        for entry in question_reports:
+            entry["qmd"] = None
+        qmd_hits = 0
+        qmd_scored = 0
+        qmd_tokens_total = 0
+        qmd_trial_samples = []
+        qmd_questions_with_raw_hits = 0
+        qmd_questions_with_scoped_hits = 0
+
+    # Codex Round 1 diagnostic, computed once the run (or its cleanup
+    # above) has settled: see ``QMD_SCOPE_OVERLAP_NOTE`` for the three-way
+    # meaning. Deliberately *not* folded into ``qmd_hit_rate`` -- a scope
+    # mismatch is a setup problem, not a retrieval-quality number, and the
+    # two must stay distinguishable the same way privacy false positives
+    # and false negatives are kept apart elsewhere in this report.
+    if not qmd_compared or qmd_questions_with_raw_hits == 0:
+        qmd_scope_overlap = None
+    else:
+        qmd_scope_overlap = qmd_questions_with_scoped_hits > 0
 
     return {
         "schema": REPORT_SCHEMA,
@@ -595,6 +754,19 @@ def run_shadow_benchmark(
         "composed_revision": plan.composed_revision,
         "bundle_index_revision": plan.bundle_index_revision,
         "embedding_revision": plan.embedding_revision,
+        # QMD baseline (issue #24, D3): distinct from "lexical" above, which
+        # stays what it always was -- the platform's own catalog search.
+        # ``qmd_compared`` is the single field callers must check before
+        # trusting any "qmd" question block or qmd_hit_rate below.
+        "qmd_compared": qmd_compared,
+        "qmd_index": qmd_config.index_name if qmd_config is not None else None,
+        "qmd_unavailable_reason": qmd_unavailable_reason,
+        # D2 known coverage gap (frozen, not a bug): explicit note instead
+        # of an absent or zero-valued field, so #30's gate cannot mistake
+        # "not applicable" for "measured and zero".
+        "qmd_stale_exclusion_note": QMD_STALE_EXCLUSION_NOTE,
+        "qmd_scope_overlap": qmd_scope_overlap,
+        "qmd_scope_overlap_note": QMD_SCOPE_OVERLAP_NOTE,
         # Read from the descriptor, never hardcoded: a semantic provider
         # must not be reported as a hash baseline, or vice versa (R1 review).
         "semantic": stack.embedding.descriptor.semantic,
@@ -618,6 +790,9 @@ def run_shadow_benchmark(
             "scored_questions": scored,
             "lexical_hit_rate": round(lexical_hits / scored, 4) if scored else None,
             "vector_hit_rate": round(vector_hits / scored, 4) if scored else None,
+            "qmd_hit_rate": (
+                round(qmd_hits / qmd_scored, 4) if qmd_compared and qmd_scored else None
+            ),
             # Sums *measured* questions only -- a question whose token cost
             # is unmeasured (``None``, see ``_token_cost``) contributes
             # nothing here and is counted in the paired
@@ -626,6 +801,10 @@ def run_shadow_benchmark(
             "lexical_token_cost_total": lexical_tokens_total,
             "lexical_token_cost_unmeasured_questions": lexical_tokens_unmeasured,
             "vector_token_cost_total": vector_tokens_total,
+            # D1: "context token 總量 不高於 QMD baseline" -- ``None`` (not
+            # 0) when qmd_compared is False so a mid-run failure can never
+            # leave a valid-looking number behind for #30 to gate against.
+            "qmd_token_cost_total": qmd_tokens_total if qmd_compared else None,
             "vector_token_cost_unmeasured_questions": vector_tokens_unmeasured,
             "lexical_no_answer_correct": lexical_no_answer_correct,
             "citation_correct_questions": citation_correct_count,
@@ -655,6 +834,11 @@ def run_shadow_benchmark(
             "trials_per_question": trials,
             "lexical": _latency_block(lexical_trial_samples),
             "vector": _latency_block(vector_trial_samples),
+            # Always 1 trial per question regardless of ``trials`` -- see
+            # the qmd_config docstring above. ``None`` (not an empty block)
+            # when qmd was never compared, so a caller cannot mistake "no
+            # samples" for "measured and it was instant".
+            "qmd": (_latency_block(qmd_trial_samples) if qmd_compared else None),
         },
     }
 

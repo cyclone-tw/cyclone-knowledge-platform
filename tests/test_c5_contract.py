@@ -48,7 +48,12 @@ def test_c5_expected_index_modules_are_present() -> None:
         "revision.py",
     }
     benchmark_names = {path.name for path in (REPO_ROOT / "benchmarks").glob("*.py")}
-    assert benchmark_names == {"__init__.py", "questions.py", "shadow.py"}
+    assert benchmark_names == {
+        "__init__.py",
+        "questions.py",
+        "resilience.py",
+        "shadow.py",
+    }
 
 
 def test_index_package_stays_inside_the_offline_boundary() -> None:
