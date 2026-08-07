@@ -104,12 +104,20 @@ def test_qdrant_client_is_not_a_base_dependency() -> None:
 
 
 def test_composition_has_no_permissive_defaults() -> None:
+    # ``plan_rebuild``'s ``admissible`` (issue #26 Round 2 coordinator
+    # review) is the one deliberate, reviewed exception: it defaults to
+    # public-only, so every pre-#26 caller (the Gateway; every test call
+    # site that predates issue #26) is unaffected by this parameter existing
+    # at all -- widening it is only ever an explicit pilot-benchmark choice.
+    # Every *other* parameter, on every target here, still has no default.
+    permissive_defaults_allowed = {plan_rebuild: {"admissible"}}
     for target in (plan_rebuild,):
         signature = inspect.signature(target)
+        allowed = permissive_defaults_allowed.get(target, frozenset())
         assert all(
-            parameter.default is inspect.Parameter.empty
-            and parameter.kind is inspect.Parameter.KEYWORD_ONLY
-            for parameter in signature.parameters.values()
+            parameter.kind is inspect.Parameter.KEYWORD_ONLY
+            and (parameter.default is inspect.Parameter.empty or name in allowed)
+            for name, parameter in signature.parameters.items()
         ), target
     qdrant_signature = inspect.signature(QdrantVectorIndex.__init__)
     assert all(

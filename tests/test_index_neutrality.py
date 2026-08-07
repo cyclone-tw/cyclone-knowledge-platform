@@ -12,6 +12,7 @@ import inspect
 from pathlib import Path
 
 import pytest
+from benchmarks.questions import QUESTIONS
 from benchmarks.shadow import run_shadow_benchmark, strip_latency
 
 from ckp.index import (
@@ -147,6 +148,7 @@ def test_the_same_caller_runs_both_providers_unchanged() -> None:
         index_provider=InMemoryVectorIndex(),
         gate=public_gate(),
         top_k=3,
+        questions=QUESTIONS,
         trials=1,
     )
     third_party = run_shadow_benchmark(
@@ -155,6 +157,7 @@ def test_the_same_caller_runs_both_providers_unchanged() -> None:
         index_provider=ThirdPartyListIndex(),
         gate=public_gate(),
         top_k=3,
+        questions=QUESTIONS,
         trials=1,
     )
 

@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from benchmarks.questions import QUESTIONS
 from benchmarks.shadow import run_shadow_benchmark, strip_latency
 
 from ckp.index import InMemoryVectorIndex, QdrantVectorIndex, plan_rebuild
@@ -177,6 +178,7 @@ def test_shadow_benchmark_runs_identically_on_qdrant() -> None:
             index_provider=InMemoryVectorIndex(),
             gate=public_gate(),
             top_k=3,
+            questions=QUESTIONS,
             trials=1,
         )
         against_qdrant = run_shadow_benchmark(
@@ -185,6 +187,7 @@ def test_shadow_benchmark_runs_identically_on_qdrant() -> None:
             index_provider=qdrant,
             gate=public_gate(),
             top_k=3,
+            questions=QUESTIONS,
             trials=1,
         )
     finally:

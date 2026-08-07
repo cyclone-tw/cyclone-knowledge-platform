@@ -314,21 +314,45 @@ def _note_text(decoded: str) -> str:
     return decoded[closing + len("\n---\n") :]
 
 
+#: Production/pre-#26 default: only ``public`` content is ever embedded.
+#: Callers never pass ``admissible`` -- this constant is what they get, so
+#: production behavior is bit-for-bit unchanged by the parameter below
+#: existing at all (issue #26 coordinator review, Round 2).
+_DEFAULT_INDEX_ADMISSIBLE: frozenset[PrivacyClass] = frozenset({PrivacyClass.PUBLIC})
+
+
 def plan_rebuild(
     *,
     members: tuple[BundleMember, ...],
     stack: EmbeddingStack,
     gate: PrivacyGate,
+    admissible: frozenset[PrivacyClass] = _DEFAULT_INDEX_ADMISSIBLE,
 ) -> RebuildPlan:
     """Gate, embed, and order the corpus into a provider-ready plan.
 
     Exclusion is silent and counted, never detailed: a refused member's
     path or content appearing in any output would defeat the point of
-    refusing it. Only members the gate admits as ``public`` are embedded;
-    an undetermined class, a non-public class, undecodable bytes, or text
-    the embedder refuses (empty after tokenization) all fail closed into
-    ``excluded_count``.
+    refusing it. Only members the gate admits *and* whose admitted class is
+    in ``admissible`` are embedded; an undetermined class, a class outside
+    ``admissible``, undecodable bytes, or text the embedder refuses (empty
+    after tokenization) all fail closed into ``excluded_count``.
+
+    ``admissible`` and ``gate`` are independent, ANDed restrictions -- a
+    member must pass ``gate`` (which enforces its own configured admissible
+    set, plus the unconditional ``student-private`` refusal) *and* have its
+    admitted class in ``admissible`` here. Defaults to public-only, matching
+    every caller before issue #26 exactly; the only reason to widen it is
+    the Epic #21 D2 pilot corpus, which Cyclone-Wiki has frozen at
+    ``internal`` because the wiki has zero ``public`` notes to test against
+    instead. ``student-private`` is refused here too, unconditionally,
+    mirroring ``PrivacyGate``'s own hard rule (Decision §2) -- so a caller
+    mistake in ``admissible`` alone still fails closed even if ``gate``'s own
+    configuration were somehow wrong, the same two-independent-signals
+    pattern ``ckp.pilot.manifest`` already uses for ``type: Student
+    Reference``.
     """
+    if PrivacyClass.STUDENT_PRIVATE in admissible:
+        raise IndexRefusal(IndexErrorCode.PLAN_INVALID)
     if not isinstance(members, tuple) or not members:
         raise IndexRefusal(IndexErrorCode.PLAN_INVALID)
     bundle_revision = compute_index_revision_from_members(members)
@@ -339,8 +363,13 @@ def plan_rebuild(
     admitted: list[tuple[BundleMember, str]] = []
     for member in ordered:
         verdict = gate.admit_member(member)
+        # Name kept from before #26 (only ever meant "public" then) even
+        # though the check now reads against ``admissible``, which may be
+        # wider -- renaming it would drift from the mutation matrix's pinned
+        # ``if not admitted_public:`` line (scripts/test-c5-mutations.sh M4)
+        # for no behavioral gain.
         admitted_public = (
-            isinstance(verdict, Admitted) and verdict.privacy is PrivacyClass.PUBLIC
+            isinstance(verdict, Admitted) and verdict.privacy in admissible
         )
         if not admitted_public:
             continue
