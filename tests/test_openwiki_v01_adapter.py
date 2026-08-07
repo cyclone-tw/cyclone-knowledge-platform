@@ -28,6 +28,7 @@ unmapped-field behavior -- is synthetic-only and does run in CI.
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 import subprocess
 import sys
@@ -160,6 +161,202 @@ def test_all_legal_iso8601_offset_forms_map_without_a_gap(raw_timestamp: str) ->
     assert "legacy" not in result.metadata
     assert "metadata_gaps" not in result.metadata
     assert "timestamp" not in result.metadata
+
+
+@pytest.mark.parametrize(
+    "raw_timestamp",
+    [
+        pytest.param("2025-05-01T09:30:00+99:00", id="offset-hour-out-of-range"),
+        pytest.param("2025-05-01T09:30:00+99", id="offset-hour-out-of-range-short"),
+        pytest.param("2025-05-01T09:30:00+23:59", id="offset-beyond-real-timezones"),
+        pytest.param("2025-13-01T09:30:00+08:00", id="month-13"),
+        pytest.param("2025-05-32T09:30:00+08:00", id="day-32"),
+        pytest.param("2025-02-30T09:30:00+08:00", id="february-30th"),
+        pytest.param("2025-05-01T25:30:00+08:00", id="hour-25"),
+        pytest.param("2025-05-01T09:99:00+08:00", id="minute-99"),
+        pytest.param("not-a-timestamp-at-all", id="garbage-string"),
+    ],
+)
+def test_syntactically_shaped_but_nonexistent_values_still_gap(
+    raw_timestamp: str,
+) -> None:
+    """Codex review round 3: widening offset acceptance must not also widen
+    it into accepting values that cannot exist -- `+99:00`, month `99`,
+    hour `25`, etc. `datetime.fromisoformat` already performs real
+    calendar/clock validation; `_MAX_UTC_OFFSET` additionally narrows
+    Python's own <24h offset allowance down to the real UTC-12..UTC+14
+    range (`+23:59` is syntactically < 24h but no timezone uses it).
+
+    Mutation check: replace the ``fromisoformat``-based evidence check with
+    the round-2 regex (no calendar/offset-range validation) -- this
+    assertion goes red because ``created_at`` would then be set from
+    values like `2025-13-01T09:30:00+08:00`.
+    """
+    metadata = dict(RAW_V01_METADATA)
+    metadata["timestamp"] = raw_timestamp
+    result = convert_openwiki_v01(metadata)
+    assert "created_at" not in result.metadata
+    assert "created_at" in {g.field for g in result.gaps}
+
+
+def test_offset_aware_datetime_object_maps_to_created_at() -> None:
+    """The production path: PyYAML parses an *unquoted* ISO timestamp into
+    a `datetime` object, and OpenWiki v0.1's real `Date.toISOString()`
+    output is unquoted. Codex review round 3 found the pre-fix adapter only
+    branched on `isinstance(raw_timestamp, str)`, so this exact case --
+    the common real one -- silently fell through to "insufficient
+    evidence" despite carrying a perfectly good offset.
+    """
+    metadata = dict(RAW_V01_METADATA)
+    metadata["timestamp"] = dt.datetime(
+        2025, 5, 1, 9, 30, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))
+    )
+    result = convert_openwiki_v01(metadata)
+    assert result.metadata["created_at"] == "2025-05-01T09:30:00+08:00"
+    assert "created_at" not in {g.field for g in result.gaps}
+
+
+def test_naive_datetime_object_still_gaps() -> None:
+    """A `datetime` with no `tzinfo` carries no more evidence than a
+    date-only string -- PyYAML produces exactly this for an unquoted
+    timestamp with a time component but no offset.
+    """
+    metadata = dict(RAW_V01_METADATA)
+    metadata["timestamp"] = dt.datetime(2025, 5, 1, 9, 30, 0)  # no tzinfo
+    result = convert_openwiki_v01(metadata)
+    assert "created_at" not in result.metadata
+    assert "created_at" in {g.field for g in result.gaps}
+
+
+def test_bare_date_object_still_gaps() -> None:
+    """PyYAML parses an unquoted date-only value (`timestamp: 2025-05-01`)
+    into a `datetime.date`, not a string -- same insufficiency, different
+    Python type.
+    """
+    metadata = dict(RAW_V01_METADATA)
+    metadata["timestamp"] = dt.date(2025, 5, 1)
+    result = convert_openwiki_v01(metadata)
+    assert "created_at" not in result.metadata
+    assert "created_at" in {g.field for g in result.gaps}
+
+
+def test_convert_note_text_with_unquoted_timestamp_uses_the_datetime_branch() -> None:
+    """The real end-to-end path Codex round 3 asked for: an *unquoted*
+    timestamp in actual frontmatter text, run through `convert_note_text`
+    (the production entry point), not just the dict-based
+    `convert_openwiki_v01`. This is exactly the shape
+    `Date.toISOString()` produces and is the gap the pure-function tests
+    above did not close on their own.
+    """
+    text = (
+        "---\n"
+        "type: Concept\n"
+        "title: Sample Concept\n"
+        "id: 018f6d00-0000-7000-8000-000000000001\n"
+        "status: draft\n"
+        "workflow_status: active\n"
+        "privacy: internal\n"
+        "content_category: ai\n"
+        "topic_id: 018f6d00-0000-7000-8000-000000000384\n"
+        "timestamp: 2025-05-01T09:30:00+08:00\n"  # unquoted -- YAML datetime
+        "citations:\n"
+        "- https://example.org\n"
+        "generated:\n"
+        "  by: test/fixture\n"
+        "  at: '2026-07-27T10:00:00+08:00'\n"
+        "---\n"
+        "\n"
+        "# Sample Concept\n"
+        "\n"
+        "content.\n"
+    )
+    document, result = convert_note_text(text)
+    assert result.metadata["created_at"] == "2025-05-01T09:30:00+08:00"
+    assert "created_at" not in {g.field for g in result.gaps}
+    # `generated` is supplied here too, specifically so `legacy` stays
+    # fully absent -- proof the datetime branch produces zero gaps, the
+    # same as the string branch does for equally sufficient evidence.
+    assert "legacy" not in result.metadata
+    assert "created_at:" in document
+
+
+def test_convert_note_text_with_unquoted_date_only_timestamp_still_gaps() -> None:
+    """The unquoted-`date` counterpart of the test above: still a gap."""
+    text = (
+        "---\n"
+        "type: Concept\n"
+        "title: Sample Concept\n"
+        "id: 018f6d00-0000-7000-8000-000000000001\n"
+        "status: draft\n"
+        "workflow_status: active\n"
+        "privacy: internal\n"
+        "content_category: ai\n"
+        "topic_id: 018f6d00-0000-7000-8000-000000000384\n"
+        "timestamp: 2025-05-01\n"  # unquoted -- YAML date
+        "citations:\n"
+        "- https://example.org\n"
+        "---\n"
+        "\n"
+        "# Sample Concept\n"
+        "\n"
+        "content.\n"
+    )
+    document, result = convert_note_text(text)
+    assert "created_at" not in result.metadata
+    assert result.metadata["legacy"] is True
+    assert "created_at" in result.metadata["metadata_gaps"]
+
+
+@pytest.mark.parametrize(
+    "citations_value, capital_citations_value, expect_raise",
+    [
+        pytest.param(None, None, False, id="null-null"),
+        pytest.param([], [], False, id="empty-empty"),
+        pytest.param(
+            ["https://example.org"], ["https://example.org"], False, id="equal-lists"
+        ),
+        pytest.param(None, ["https://example.org"], True, id="null-vs-list"),
+        pytest.param(["https://example.org"], None, True, id="list-vs-null"),
+        pytest.param(
+            ["https://example.org"],
+            ["https://other.example.org"],
+            True,
+            id="conflicting-lists",
+        ),
+    ],
+)
+def test_citations_case_variant_matrix(
+    citations_value, capital_citations_value, expect_raise: bool
+) -> None:
+    """Pin the full `citations`/`Citations` co-presence matrix Codex round 2
+    verified by hand but that had no explicit test: matching values (even
+    ``None``/``None`` or ``[]``/``[]``) are fully recorded, mismatched
+    values raise rather than guess.
+    """
+    metadata = dict(RAW_V01_METADATA)
+    metadata["citations"] = citations_value
+    metadata["Citations"] = capital_citations_value
+
+    if expect_raise:
+        with pytest.raises(OpenWikiConversionError, match="conflicting"):
+            convert_openwiki_v01(metadata)
+        return
+
+    result = convert_openwiki_v01(metadata)
+    assert "citations" not in result.metadata
+    assert "Citations" not in result.metadata
+    dropped_fields = {d.field for d in result.dropped}
+    mapped_sources = {
+        m.source_field for m in result.mapped if m.target_field == "sources"
+    }
+    # The non-priority key (`Citations`) is always an explicit recorded
+    # duplicate, regardless of whether the shared value was usable.
+    assert "Citations" in dropped_fields
+    # The priority key (`citations`) is accounted for either as a drop
+    # (its value was not a usable non-empty list, e.g. None or []) or as a
+    # mapped `sources` entry (a real list) -- never simply absent from
+    # every one of mapped/dropped/gaps.
+    assert "citations" in dropped_fields or "citations" in mapped_sources
 
 
 def test_existing_created_at_supersedes_v01_timestamp() -> None:
