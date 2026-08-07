@@ -208,7 +208,12 @@ def _ci_workflow_env_names() -> set[str]:
     workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
-    return set(re.findall(r"^\s*(CKP_[A-Z0-9_]+)\s*:", workflow, re.MULTILINE))
+    # Matches the name wherever it appears as a mapping key: bare, single- or
+    # double-quoted, and inside a flow mapping (`{CKP_X: "1"}`), which are all
+    # legal YAML for the same thing. Anchoring on the prefix rather than on
+    # line structure keeps a formatting choice from silently shrinking what
+    # this guard sees.
+    return set(re.findall(r"""['"{,\s](CKP_[A-Za-z0-9_]+)['"]?\s*:""", workflow))
 
 
 def test_every_ci_env_name_is_a_config_key_or_explicitly_reserved() -> None:
@@ -235,6 +240,28 @@ def test_every_ci_env_name_is_a_config_key_or_explicitly_reserved() -> None:
             f"ConfigError. Register it in defaults.toml if it is a config "
             f"value, or add it to RESERVED_ENV if it is a harness switch."
         )
+
+
+def test_no_config_key_is_also_reserved() -> None:
+    """A real config key wrongly added to ``RESERVED_ENV`` fails silently.
+
+    The override loop skips reserved names before the lookup, so the variable
+    would simply stop working -- no error, no warning, just a setting that
+    quietly ignores its environment override. That is worse than the
+    ConfigError this issue was about, because nothing points at it at all.
+    """
+    defaults = _load_defaults()
+    config_keys = {
+        _env_name(section, key)
+        for section, entries in defaults.items()
+        for key in entries
+    }
+    overlap = sorted(config_keys & RESERVED_ENV)
+    assert not overlap, (
+        f"{overlap} appear both as config keys and in RESERVED_ENV; the "
+        f"override loop skips reserved names, so these would silently stop "
+        f"reading their environment variable"
+    )
 
 
 def test_the_ci_workflow_actually_sets_some_ckp_names() -> None:
