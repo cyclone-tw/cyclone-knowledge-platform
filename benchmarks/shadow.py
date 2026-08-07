@@ -490,6 +490,7 @@ def run_shadow_benchmark(
     qmd_hits = 0
     qmd_scored = 0
     qmd_tokens_total = 0
+    qmd_tokens_unmeasured = 0
     qmd_trial_samples: list[float] = []
     #: Codex Round 1 diagnostic (see ``QMD_SCOPE_OVERLAP_NOTE``): counts
     #: across the whole run, independent of any single question's hit/miss.
@@ -591,7 +592,10 @@ def run_shadow_benchmark(
                 qmd_cost = qmd_token_cost(
                     qmd_result.paths, wiki_root=qmd_config.wiki_root
                 )
-                qmd_tokens_total += qmd_cost
+                if qmd_cost is None:
+                    qmd_tokens_unmeasured += 1
+                else:
+                    qmd_tokens_total += qmd_cost
                 qmd_block = {
                     "paths": list(qmd_result.paths),
                     "hit": qmd_hit,
@@ -729,6 +733,7 @@ def run_shadow_benchmark(
         qmd_hits = 0
         qmd_scored = 0
         qmd_tokens_total = 0
+        qmd_tokens_unmeasured = 0
         qmd_trial_samples = []
         qmd_questions_with_raw_hits = 0
         qmd_questions_with_scoped_hits = 0
@@ -808,6 +813,12 @@ def run_shadow_benchmark(
             # 0) when qmd_compared is False so a mid-run failure can never
             # leave a valid-looking number behind for #30 to gate against.
             "qmd_token_cost_total": qmd_tokens_total if qmd_compared else None,
+            # Mirrors the lexical/vector unmeasured counters: a QMD-side
+            # token count that could not be measured is counted here, never
+            # folded into the total as zero (#40 round 1).
+            "qmd_token_cost_unmeasured_questions": (
+                qmd_tokens_unmeasured if qmd_compared else None
+            ),
             "vector_token_cost_unmeasured_questions": vector_tokens_unmeasured,
             "lexical_no_answer_correct": lexical_no_answer_correct,
             "citation_correct_questions": citation_correct_count,

@@ -314,11 +314,15 @@ def test_qmd_token_cost_sums_across_multiple_paths(tmp_path: Path) -> None:
     assert cost == 5
 
 
-def test_qmd_token_cost_skips_unreadable_paths_instead_of_raising(
+def test_qmd_token_cost_does_not_raise_on_an_unreadable_path(
     tmp_path: Path,
 ) -> None:
+    """Superseded pin, updated in #40 round 1: the old skip-and-undercount
+    contract returned a confident 0 here, which drifted from the platform
+    sides' None semantics and fed D1 a fake baseline. Not raising is still
+    the contract; the value is now honestly unmeasured."""
     cost = qmd_token_cost(("Core/does-not-exist.md",), wiki_root=tmp_path)
-    assert cost == 0
+    assert cost is None
 
 
 def test_qmd_token_cost_never_writes_any_file(
@@ -398,3 +402,17 @@ def test_real_qmd_named_index_returns_hits_scoped_to_pilot_manifest() -> None:
     )
     result = run_qmd_query("wiki note retrieval procedure", config=config, top_k=5)
     assert all(path in PILOT_NOTE_PATHS for path in result.paths)
+
+
+def test_qmd_token_cost_is_none_when_any_path_is_unreadable(tmp_path):
+    """Codex round 1 on #40: skip-and-undercount turned "could not read
+    anything" into a confident 0 -- a fake baseline for D1's relative token
+    threshold. One unreadable path makes the whole tuple unmeasured, same
+    semantics as measure_token_cost."""
+    root = tmp_path
+    note = root / "Core" / "ok.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("---\nprivacy: internal\n---\n\none two three\n", encoding="utf-8")
+    assert qmd_token_cost(("Core/ok.md",), wiki_root=root) == 3
+    assert qmd_token_cost(("Core/ok.md", "Core/missing.md"), wiki_root=root) is None
+    assert qmd_token_cost(("Core/missing.md",), wiki_root=root) is None

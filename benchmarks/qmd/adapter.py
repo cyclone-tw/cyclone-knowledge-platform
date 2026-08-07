@@ -154,7 +154,7 @@ def qmd_binary_available(binary: str = DEFAULT_QMD_BINARY) -> bool:
     return shutil.which(binary) is not None
 
 
-def qmd_token_cost(paths: tuple[str, ...], *, wiki_root: Path) -> int:
+def qmd_token_cost(paths: tuple[str, ...], *, wiki_root: Path) -> int | None:
     """Whitespace-proxy token count (``TOKEN_COST_METHOD``) for QMD hits.
 
     Reads each note's body via ``benchmarks.token_cost.read_real_body_tokens``
@@ -162,19 +162,18 @@ def qmd_token_cost(paths: tuple[str, ...], *, wiki_root: Path) -> int:
     same one the platform's own ``lexical``/``vector`` sides now call, so
     the two sides of the D1 comparison cannot drift apart on how a token is
     counted. Nothing here is written to disk, logged, or returned as text;
-    only the integer sum leaves this function. A path that cannot be read is
-    skipped rather than raised: by the time this is called, ``paths`` has
-    already passed the corpus-scope filter and the caller
-    (``benchmarks.shadow``) has already committed to ``qmd_compared: True``
-    for this question, so a single unreadable file should not retroactively
-    invalidate the whole comparison -- it is undercounted instead, same as a
-    lexical/vector engine returning fewer results than expected.
+    only the integer sum leaves this function -- or ``None``. Codex round 1
+    on #40: the old skip-and-undercount turned "could not read anything" into
+    a confident ``0``, drifting from the ``None`` semantics the platform
+    sides use and handing D1's relative token threshold a fake baseline. One
+    unreadable (or undecodable) path now makes the whole tuple unmeasured,
+    exactly like ``measure_token_cost``.
     """
     total = 0
     for relative_path in paths:
         tokens = read_real_body_tokens(relative_path, wiki_root=wiki_root)
         if tokens is None:
-            continue
+            return None
         total += tokens
     return total
 

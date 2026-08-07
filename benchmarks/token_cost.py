@@ -68,15 +68,15 @@ def _count_tokens(text: str) -> int:
 def read_real_body_tokens(relative_path: str, *, wiki_root: Path) -> int | None:
     """Read one real note's body from ``wiki_root``, count, and discard.
 
-    Returns ``None`` (not raised, not 0) when the file cannot be read
-    (missing, permission error, or any other ``OSError``) -- a caller
-    decides for itself whether an unreadable path should undercount the
-    total or make the whole measurement unmeasured; this function only
-    ever reports what it could actually read.
+    Returns ``None`` (not raised, not 0) when the file cannot be read as
+    UTF-8 text -- missing, permission error, any other ``OSError``, or bytes
+    that do not decode. Codex round 1: ``errors="replace"`` turned a non-UTF-8
+    file into countable mojibake and a *fake measured number* (a binary read
+    704 "tokens"); undecodable is unmeasured, never a count.
     """
     try:
-        text = (wiki_root / relative_path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        text = (wiki_root / relative_path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
         return None
     return _count_tokens(_strip_frontmatter(text))
 

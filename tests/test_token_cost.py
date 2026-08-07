@@ -166,3 +166,14 @@ def test_read_real_body_tokens_strips_frontmatter(tmp_path: Path) -> None:
     assert read_real_body_tokens("Core/note.md", wiki_root=tmp_path) == len(
         body.split()
     )
+
+
+def test_non_utf8_file_is_unmeasured_not_a_mojibake_count(tmp_path):
+    """Codex round 1 on #40: errors="replace" turned a binary file into
+    countable mojibake -- a fake measured number. Undecodable is None."""
+    root = tmp_path
+    target = root / "Core" / "binary.md"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"\xff\xfe\x00\x01 not utf-8 \xff")
+    assert read_real_body_tokens("Core/binary.md", wiki_root=root) is None
+    assert measure_token_cost(("Core/binary.md",), wiki_root=root) is None
