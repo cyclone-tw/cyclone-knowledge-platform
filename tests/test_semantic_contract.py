@@ -486,3 +486,60 @@ def test_build_descriptor_is_otherwise_honest() -> None:
     assert descriptor.deterministic is True
     assert descriptor.requires_network is False
     assert descriptor.semantic is True
+
+
+# --- R1 review, round 3: CI proved Codex Finding 1 in production -- the
+# --- golden-digest tests in tests/test_semantic_embedding_provider.py were
+# --- frozen on a MacBook (arm64) and failed on CI's ubuntu x86_64 runner,
+# --- because onnxruntime's kernel selection is not bit-identical across CPU
+# --- microarchitectures. Those tests were rewritten to check semantic
+# --- relationships and within-host reproducibility instead of frozen exact
+# --- vectors (see that file's module docstring for the full account). The
+# --- two checks below are weight-free: they verify the *threshold values*
+# --- and the *shape of the within-host check* themselves are not
+# --- accidentally weakened to something that would rubber-stamp any model,
+# --- without needing the pinned weights to catch that regression.
+
+
+def test_semantic_relationship_thresholds_have_real_margin() -> None:
+    """A threshold weakened to accept any cosine value (e.g.
+    ``RELATED_MIN = -1.0``, which is trivially true for every possible
+    cosine similarity) would make
+    ``tests/test_semantic_embedding_provider.py``'s semantic-relationship
+    checks pass regardless of model quality -- silently turning a
+    discriminating test into a no-op. Reads the shared constants from
+    ``semantic_fixtures.py`` directly, so this catches that regression
+    without needing the pinned weights or running any inference."""
+    from semantic_fixtures import RELATED_MIN, UNRELATED_MAX
+
+    assert -1.0 < RELATED_MIN <= 1.0
+    assert -1.0 <= UNRELATED_MAX < 1.0
+    assert RELATED_MIN > UNRELATED_MAX
+    # Not just "not degenerate" -- a floor under how weak either threshold
+    # is allowed to get, so a well-intentioned "give it more headroom"
+    # edit cannot quietly widen the acceptance range past meaningfulness.
+    assert RELATED_MIN >= 0.6, "related threshold too weak to be meaningful"
+    assert UNRELATED_MAX <= 0.6, "unrelated threshold too weak to be meaningful"
+
+
+def test_the_cross_process_check_actually_runs_twice_with_different_settings() -> None:
+    """Proving within-host determinism requires two independent runs
+    compared against each other -- a version reduced to one run (or one run
+    compared to itself) would trivially "pass" without checking anything,
+    which is exactly as uninformative as the trivial-threshold failure mode
+    above. Source-level check, mirroring
+    ``tests/test_embedding_provider.py``'s
+    ``test_a_reranker_reports_the_flags_of_the_embedder_it_wraps``, so it
+    does not need the pinned weights to catch a reduction to one run --
+    only importing the test module (which resolves whether the model cache
+    is reachable, but does not require it) and reading its source.
+    """
+    import inspect
+
+    import test_semantic_embedding_provider as semantic_provider_tests
+
+    source = inspect.getsource(
+        semantic_provider_tests.test_vectors_are_identical_across_processes_and_thread_counts
+    )
+    assert source.count("_digests_in_subprocess(") == 2
+    assert "OMP_NUM_THREADS" in source

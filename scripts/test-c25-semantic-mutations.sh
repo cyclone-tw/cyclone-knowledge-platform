@@ -230,6 +230,29 @@ expect_red \
   "provider-version fingerprint reverted to a truncated asset digest" \
   tests/test_semantic_contract.py::test_provider_version_does_not_collide_on_a_shared_digest_prefix
 
+echo "==> round 3: the semantic-quality checks cannot be silently defanged"
+new_case
+replace_once \
+  "tests/semantic_fixtures.py" \
+  "RELATED_MIN = 0.7" \
+  "RELATED_MIN = -1.0  # mutant: 'always pass' threshold, cosine is bounded [-1, 1]"
+expect_red \
+  "semantic relationship threshold weakened to accept any cosine value" \
+  tests/test_semantic_contract.py::test_semantic_relationship_thresholds_have_real_margin
+
+new_case
+replace_once \
+  "tests/test_semantic_embedding_provider.py" \
+  '    first = _digests_in_subprocess({})
+    second = _digests_in_subprocess({"OMP_NUM_THREADS": "4"})
+    assert first == second' \
+  '    first = _digests_in_subprocess({})
+    second = first  # mutant: only one subprocess run, compared to itself
+    assert first == second'
+expect_red \
+  "cross-process determinism check reduced to a single run compared with itself" \
+  tests/test_semantic_contract.py::test_the_cross_process_check_actually_runs_twice_with_different_settings
+
 echo "==> the semantic stack validates itself rather than trusting its builder"
 new_case
 replace_once \

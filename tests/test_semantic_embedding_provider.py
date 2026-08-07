@@ -7,6 +7,26 @@ cache is absent or fails digest verification; in CI
 ``CKP_REQUIRE_SEMANTIC=1`` turns that skip into a failure so this path can
 never silently stop running -- mirroring ``tests/test_index_qdrant.py``'s
 ``CKP_REQUIRE_QDRANT`` exactly.
+
+**Round 3 (CI, real failure, not a flake).** This file used to pin a
+``GOLDEN`` dict of sha256 digests over packed embedding vectors, frozen on
+one MacBook (arm64). CI (ubuntu x86_64) failed every one of them the first
+time it ran this suite: ``onnxruntime``'s kernel selection is not
+bit-identical across CPU microarchitectures, even with thread count pinned
+and the same package versions -- exactly what ``ckp.semantic.provider``'s
+module docstring already said ``deterministic=True`` does *not* cover. The
+docstring was right; the tests contradicted it. Nothing here pins an exact
+vector to a cross-machine constant anymore. What is checked instead:
+semantic *relationships* between freshly computed vectors (cosine
+similarity, with real margin -- stable across hosts because small
+floating-point drift moves a cosine value by far less than the thresholds'
+margins), within-host reproducibility (compared fresh against itself on
+whichever host is running the suite, never a frozen value), and structural
+properties (dimension, dtype, unit norm) that genuinely are stable across
+hosts. Detecting a swapped model is still covered -- just by the correct
+mechanism, ``ckp.semantic.assets.resolve_semantic_assets``'s content-digest
+verification (``tests/test_semantic_contract.py``), not by comparing
+inference output to a frozen value.
 """
 
 from __future__ import annotations
@@ -34,6 +54,7 @@ from ckp.semantic.provider import (
     _compute_fingerprinted_provider_version,
     _installed_runtime_versions,
 )
+from semantic_fixtures import RELATED_MIN, UNRELATED_MAX, cosine
 
 _MODEL_DIR_RAW = os.environ.get("CKP_SEMANTIC_MODEL_DIR", "")
 _REQUIRED = os.environ.get("CKP_REQUIRE_SEMANTIC") == "1"
@@ -62,28 +83,31 @@ needs_semantic = pytest.mark.skipif(
     reason="no local semantic model cache reachable (CKP_SEMANTIC_MODEL_DIR)",
 )
 
-#: Golden digests over the packed float64 embed_query vectors, produced
-#: against the pinned model in this repo's own evaluation session (two
-#: separate interpreter processes, one with OMP_NUM_THREADS=4 forced, both
-#: identical). A change here means either the pinned weights moved (a
-#: manifest edit) or the pooling/normalization code changed -- never a
-#: quiet edit either way.
-GOLDEN = {
-    "kettle temperature control": (
-        "845bc2708a53931b8d644c92ad34b000580b2344bf281ecce1c7f382dab82fcc"
-    ),
-    "手沖 咖啡 水溫 控制": (
-        "3ee3291db29966601fd389e6b368cd46a8250342a52f51761807251d602fabd7"
-    ),
-    "特教 個別化 教育 計畫": (
-        "108033347dfe8623953910b1cf4bcd72143d767837d109fcc4665e3484be83e7"
-    ),
-    "個別化教育計畫要怎麼撰寫": (
-        "0361cc5b435a109042bc41120191e25268e31f22402acaa0608000fc040c813e"
-    ),
-}
+#: Representative sample texts -- Chinese-majority, matching the pilot
+#: corpus this benchmark exists to evaluate (``tests/embedding_fixtures.py``
+#: ``SAMPLE_TEXTS`` uses the same mix). Used across several structural
+#: tests below. Deliberately *not* paired with frozen output digests -- see
+#: ``test_vectors_are_identical_across_processes_and_thread_counts`` for
+#: why: this repo's own CI caught the reason. Golden digests over the
+#: packed vectors were frozen on a MacBook (arm64) during development; CI
+#: runs ubuntu x86_64, and every single one of them failed there --
+#: ``onnxruntime``'s kernel selection is not bit-identical across CPU
+#: microarchitectures even with thread count pinned and the same package
+#: versions, exactly as ``ckp.semantic.provider``'s module docstring
+#: (written *before* this was caught) already said it would not be. That
+#: docstring was honest; the tests were not yet consistent with it. Fixed
+#: here by testing what is actually true across machines: the semantic
+#: relationships between vectors, and within-host reproducibility checked
+#: freshly on whichever host is running the suite, never against a value
+#: baked in from a different one.
+SAMPLE_TEXTS = (
+    "kettle temperature control",
+    "手沖 咖啡 水溫 控制",
+    "特教 個別化 教育 計畫",
+    "個別化教育計畫要怎麼撰寫",
+)
 
-_GOLDEN_SCRIPT = """
+_EMBED_SCRIPT = """
 import hashlib, json, os, struct, sys
 from pathlib import Path
 from ckp.semantic.provider import SemanticEmbeddingProvider
@@ -109,8 +133,8 @@ def _digests_in_subprocess(extra_env: dict[str, str]) -> dict[str, str]:
     environment["CKP_SEMANTIC_MODEL_DIR"] = str(_MODEL_DIR)
     environment.update(extra_env)
     completed = subprocess.run(
-        [sys.executable, "-c", _GOLDEN_SCRIPT],
-        input=json.dumps(list(GOLDEN)),
+        [sys.executable, "-c", _EMBED_SCRIPT],
+        input=json.dumps(list(SAMPLE_TEXTS)),
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -123,21 +147,38 @@ def _digests_in_subprocess(extra_env: dict[str, str]) -> dict[str, str]:
 
 @needs_semantic
 def test_vectors_are_identical_across_processes_and_thread_counts() -> None:
-    """The oracle lives outside the unit, same reasoning as the hash
+    """Within-host determinism, checked freshly against itself -- not
+    against a value frozen on a different machine (round 3: CI proved that
+    was wrong; see the ``SAMPLE_TEXTS`` docstring above).
+
+    The oracle still lives outside the unit, same reasoning as the hash
     provider's equivalent test: nothing inside one process proves the ONNX
     session is actually pinned to single-threaded execution. Two
-    subprocesses, one of them with OMP_NUM_THREADS forced to 4, can."""
+    subprocesses, one of them with OMP_NUM_THREADS forced to 4, can -- and
+    this is exactly the claim ``ckp.semantic.provider``'s module docstring
+    scopes ``deterministic=True`` to: reproducible *on a given host*, which
+    this test proves by comparing two runs on whichever host is actually
+    running it, never against a cross-machine constant.
+    """
     first = _digests_in_subprocess({})
     second = _digests_in_subprocess({"OMP_NUM_THREADS": "4"})
     assert first == second
-    assert first == GOLDEN
 
 
 @needs_semantic
-def test_the_in_process_provider_matches_the_frozen_golden_digests() -> None:
+def test_in_process_vectors_match_a_fresh_subprocess() -> None:
+    """Same within-host reproducibility claim, in-process vs. subprocess
+    this time -- still nothing frozen from a different machine. This is
+    what replaces the old
+    ``test_the_in_process_provider_matches_the_frozen_golden_digests``: it
+    keeps the "does the in-process provider agree with a clean interpreter"
+    check without pinning to a value that cannot survive a different CPU.
+    """
     provider = SemanticEmbeddingProvider(model_dir=_MODEL_DIR)
-    for text, expected in GOLDEN.items():
-        assert _digest(provider.embed_query(text).values) == expected
+    in_process = {
+        text: _digest(provider.embed_query(text).values) for text in SAMPLE_TEXTS
+    }
+    assert in_process == _digests_in_subprocess({})
 
 
 @needs_semantic
@@ -146,7 +187,7 @@ def test_query_and_document_paths_are_bit_identical() -> None:
     provider carries no query-side instruction prefix -- see the module
     docstring in ``ckp.semantic.provider``."""
     provider = SemanticEmbeddingProvider(model_dir=_MODEL_DIR)
-    for text in GOLDEN:
+    for text in SAMPLE_TEXTS:
         assert (
             provider.embed_query(text).values
             == provider.embed_documents([text]).vectors[0]
@@ -156,12 +197,25 @@ def test_query_and_document_paths_are_bit_identical() -> None:
 @needs_semantic
 def test_a_batch_preserves_length_and_order() -> None:
     provider = SemanticEmbeddingProvider(model_dir=_MODEL_DIR)
-    texts = list(GOLDEN)
+    texts = list(SAMPLE_TEXTS)
     batch = provider.embed_documents(texts)
     assert len(batch.vectors) == len(texts)
     for index, text in enumerate(texts):
         assert batch.vectors[index] == provider.embed_query(text).values
     assert provider.embed_documents([]).vectors == ()
+
+
+@needs_semantic
+def test_vectors_have_the_declared_dimension_and_dtype() -> None:
+    """Structural properties, unlike exact values, are stable across hosts
+    -- these keep being asserted precisely (round 3 guidance point 4)."""
+    provider = SemanticEmbeddingProvider(model_dir=_MODEL_DIR)
+    vector = provider.embed_query(SAMPLE_TEXTS[0]).values
+    assert len(vector) == SEMANTIC_MODEL_DIMENSION
+    assert all(isinstance(value, float) for value in vector)
+    assert all(value == value for value in vector)  # no NaN
+    norm = sum(value * value for value in vector) ** 0.5
+    assert abs(norm - 1.0) < 1e-9
 
 
 @needs_semantic
@@ -179,6 +233,13 @@ def test_the_shipped_descriptor_is_honest() -> None:
     assert descriptor.semantic is True
 
 
+#: Thresholds and the cosine helper live in ``semantic_fixtures.py``, not
+#: here -- ``tests/test_semantic_contract.py`` sanity-checks the threshold
+#: *values* themselves (real margin, not tuned to the boundary) without
+#: needing the pinned weights; see that module's docstring for the measured
+#: numbers behind them.
+
+
 @needs_semantic
 def test_related_chinese_phrases_are_closer_than_unrelated_ones() -> None:
     """A quality sanity check, not just a shape check: this is the whole
@@ -187,13 +248,35 @@ def test_related_chinese_phrases_are_closer_than_unrelated_ones() -> None:
     provider = SemanticEmbeddingProvider(model_dir=_MODEL_DIR)
     related_a = provider.embed_query("特教 個別化 教育 計畫").values
     related_b = provider.embed_query("個別化教育計畫要怎麼撰寫").values
-    unrelated = provider.embed_query("kettle temperature control").values
-
-    def cosine(left: tuple[float, ...], right: tuple[float, ...]) -> float:
-        return sum(a * b for a, b in zip(left, right, strict=True))
+    # Same topic (coffee brewing), unrelated to the pair above -- not the
+    # same sentence pair used in the English case below, so this also
+    # checks a genuinely different pairing crosses the "unrelated" bar.
+    unrelated = provider.embed_query("手沖 咖啡 水溫 控制").values
 
     sim_related = cosine(related_a, related_b)
     sim_unrelated = cosine(related_a, unrelated)
+    assert sim_related > RELATED_MIN, sim_related
+    assert sim_unrelated < UNRELATED_MAX, sim_unrelated
+    assert sim_related > sim_unrelated + 0.2, (sim_related, sim_unrelated)
+
+
+@needs_semantic
+def test_related_english_phrases_are_closer_than_unrelated_ones() -> None:
+    """English case for the same check (round 3 guidance: both languages
+    need a case). Uses a near-paraphrase as the related pair rather than a
+    loosely topic-associated one -- see the threshold docstring above for
+    the measured reason."""
+    provider = SemanticEmbeddingProvider(model_dir=_MODEL_DIR)
+    related_a = provider.embed_query("kettle temperature control").values
+    related_b = provider.embed_query("controlling the temperature of the kettle").values
+    unrelated = provider.embed_query(
+        "individualized education plan for special needs students"
+    ).values
+
+    sim_related = cosine(related_a, related_b)
+    sim_unrelated = cosine(related_a, unrelated)
+    assert sim_related > RELATED_MIN, sim_related
+    assert sim_unrelated < UNRELATED_MAX, sim_unrelated
     assert sim_related > sim_unrelated + 0.2, (sim_related, sim_unrelated)
 
 
