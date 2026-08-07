@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from benchmarks.qmd.adapter import QmdBaselineConfig, QmdQueryResult, QmdUnavailable
 from benchmarks.questions import (
     NON_PUBLIC_PATHS,
     PUBLIC_DECLARED_PATHS,
@@ -39,7 +40,12 @@ from index_fixtures import (
 )
 
 
-def _run(index_provider=None, top_k: int = 3, trials: int = 1) -> dict:
+def _run(
+    index_provider=None,
+    top_k: int = 3,
+    trials: int = 1,
+    qmd_config: QmdBaselineConfig | None = None,
+) -> dict:
     return run_shadow_benchmark(
         members=corpus_members(),
         stack=deterministic_stack(),
@@ -47,6 +53,7 @@ def _run(index_provider=None, top_k: int = 3, trials: int = 1) -> dict:
         gate=public_gate(),
         top_k=top_k,
         trials=trials,
+        qmd_config=qmd_config,
     )
 
 
@@ -314,12 +321,14 @@ def test_all_required_composition_no_defaults() -> None:
 
     signature = inspect.signature(run_shadow_benchmark)
     parameters = signature.parameters
-    # ``trials`` is the sole intentional exception (contract §5.3
-    # latency-dimension addition): every composition input the harness
-    # depends on to build a correct report still has no default, but the
-    # repeat count for the latency sample is allowed a documented default
-    # so existing callers keep working unchanged.
-    assert set(parameters) - {"trials"} == {
+    # ``trials`` and ``qmd_config`` are the two intentional exceptions:
+    # every composition input the harness depends on to build a correct
+    # report still has no default, but the latency repeat count and the
+    # opt-in QMD baseline (issue #24; ``None`` means "no QMD comparison
+    # attempted", the same honest-absence shape as an unconfigured trial
+    # count) are allowed documented defaults so existing callers keep
+    # working unchanged.
+    assert set(parameters) - {"trials", "qmd_config"} == {
         "members",
         "stack",
         "index_provider",
@@ -330,6 +339,8 @@ def test_all_required_composition_no_defaults() -> None:
         assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
         if name == "trials":
             assert parameter.default == 5
+        elif name == "qmd_config":
+            assert parameter.default is None
         else:
             assert parameter.default is inspect.Parameter.empty
 
@@ -381,3 +392,293 @@ def test_rebuild_report_is_a_plain_frozen_record() -> None:
     assert isinstance(report, RebuildReport)
     with pytest.raises(AttributeError):
         report.point_count = 0  # type: ignore[misc]
+
+
+# --- QMD baseline (issue #24, Epic #21 D3) ------------------------------
+
+
+def _qmd_config(**overrides) -> QmdBaselineConfig:
+    defaults = dict(
+        index_name="cyclone-wiki",
+        wiki_root=UNUSED_ROOT,
+        # A non-empty placeholder: every call site below overrides this
+        # explicitly. An empty default here would itself be the exact
+        # config-time footgun issue #24 Round 2 exists to reject (Codex
+        # Round 1 finding) -- ``QmdBaselineConfig`` no longer accepts it.
+        corpus_paths=frozenset({"placeholder-unused.md"}),
+    )
+    defaults.update(overrides)
+    return QmdBaselineConfig(**defaults)
+
+
+def test_qmd_not_compared_by_default() -> None:
+    """No ``qmd_config`` -- the untouched shape every pre-#24 caller gets."""
+    report = _run()
+    assert report["qmd_compared"] is False
+    assert report["qmd_index"] is None
+    assert report["qmd_unavailable_reason"] is None
+    assert report["summary"]["qmd_hit_rate"] is None
+    assert report["summary"]["qmd_token_cost_total"] is None
+    assert report["latency_ms"]["qmd"] is None
+    for question in report["questions"]:
+        assert question["qmd"] is None
+    # D2 known coverage gap: an explicit note, always present, never an
+    # absent or zero-valued numeric field a gate could misread.
+    assert "superseded" in report["qmd_stale_exclusion_note"]
+    # Codex Round 1: no comparison happened, so scope-overlap is also
+    # unknown -- never False (which would imply a comparison did happen).
+    assert report["qmd_scope_overlap"] is None
+
+
+def test_qmd_baseline_populates_the_report_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real QMD adapter call, if it always finds the expected paths.
+
+    Fakes ``run_qmd_query`` so this test never needs a real subprocess --
+    the adapter's own subprocess/JSON contract is covered by
+    ``test_qmd_adapter.py``. This test is only about how ``shadow.py``
+    wires an available QMD baseline into the report.
+    """
+
+    def fake_run_qmd_query(query, *, config, top_k):
+        # Echo back whatever the current question expects, as if QMD found
+        # it perfectly -- lets this test assert a clean qmd_hit_rate of 1.0
+        # for the scored questions without depending on real search ranking.
+        for question in QUESTIONS:
+            if question.query == query:
+                return QmdQueryResult(
+                    raw_paths=question.expected_paths,
+                    paths=question.expected_paths,
+                    hits=(),
+                )
+        raise AssertionError(f"unexpected query {query!r}")
+
+    monkeypatch.setattr("benchmarks.shadow.run_qmd_query", fake_run_qmd_query)
+
+    config = _qmd_config(corpus_paths=frozenset(PUBLIC_DECLARED_PATHS))
+    report = _run(qmd_config=config)
+
+    assert report["qmd_compared"] is True
+    assert report["qmd_index"] == "cyclone-wiki"
+    assert report["qmd_unavailable_reason"] is None
+    assert report["summary"]["qmd_hit_rate"] == 1.0
+    assert report["latency_ms"]["qmd"] is not None
+    for question in report["questions"]:
+        assert question["qmd"] is not None
+        assert question["qmd"]["paths"] == list(question.get("expected_paths", []))
+
+
+def test_qmd_failure_mid_run_discards_the_whole_dimension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D3 "跑不了就整份失敗": one failed call nulls every question's qmd data.
+
+    This is the single most important guard in issue #24 -- it must be
+    impossible for a QMD outage partway through a run to leave some
+    questions "compared" and others silently blank, which would look like
+    a partial success instead of the honest "not compared" the acceptance
+    criteria require.
+    """
+    calls = {"count": 0}
+
+    def flaky_run_qmd_query(query, *, config, top_k):
+        calls["count"] += 1
+        if calls["count"] >= 3:
+            raise QmdUnavailable("simulated qmd outage")
+        return QmdQueryResult(raw_paths=(), paths=(), hits=())
+
+    monkeypatch.setattr("benchmarks.shadow.run_qmd_query", flaky_run_qmd_query)
+
+    config = _qmd_config(corpus_paths=frozenset(PUBLIC_DECLARED_PATHS))
+    report = _run(qmd_config=config)
+
+    assert report["qmd_compared"] is False
+    assert report["qmd_unavailable_reason"] == "simulated qmd outage"
+    assert report["summary"]["qmd_hit_rate"] is None
+    # A mid-run failure must not leave a valid-looking partial token total
+    # behind for #30 to gate against.
+    assert report["summary"]["qmd_token_cost_total"] is None
+    assert report["latency_ms"]["qmd"] is None
+    assert report["qmd_scope_overlap"] is None
+    for question in report["questions"]:
+        assert question["qmd"] is None
+    # The failure must not have quietly stopped the run early: every other
+    # engine still answered every question.
+    assert len(report["questions"]) == len(QUESTIONS)
+    # No further qmd calls after the failure -- exactly 3 attempts (2 ok,
+    # 1 failing), not one per remaining question.
+    assert calls["count"] == 3
+
+
+def test_qmd_never_silently_falls_back_to_the_platforms_own_lexical_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A QMD outage must produce ``None``, never the lexical block reused.
+
+    This pins the exact failure mode issue #24 exists to prevent: an
+    unavailable external baseline quietly being replaced by the platform's
+    own engine, which would make the report look like a real external
+    comparison happened when it did not.
+    """
+
+    def always_fails(query, *, config, top_k):
+        raise QmdUnavailable("qmd not installed")
+
+    monkeypatch.setattr("benchmarks.shadow.run_qmd_query", always_fails)
+
+    config = _qmd_config(corpus_paths=frozenset(PUBLIC_DECLARED_PATHS))
+    report = _run(qmd_config=config)
+
+    for question in report["questions"]:
+        assert question["qmd"] is None
+        assert question["qmd"] != question["lexical"]
+
+
+def test_qmd_scoping_excludes_hits_outside_the_configured_corpus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The report only ever sees what the adapter already scoped (D3).
+
+    ``shadow.py`` trusts ``QmdQueryResult.paths`` as pre-filtered -- this
+    test proves that trust is exercised: a hit the fake adapter fabricates
+    outside the declared corpus never reaches ``qmd_hit_rate`` as a match.
+    """
+
+    def fake_run_qmd_query(query, *, config, top_k):
+        return QmdQueryResult(
+            raw_paths=("never-in-corpus.md",),
+            paths=(),  # a real adapter would have already filtered this out
+            hits=(),
+        )
+
+    monkeypatch.setattr("benchmarks.shadow.run_qmd_query", fake_run_qmd_query)
+
+    config = _qmd_config(corpus_paths=frozenset({"never-in-corpus.md"}))
+    report = _run(qmd_config=config)
+
+    assert report["qmd_compared"] is True
+    scored_with_expectations = [q for q in report["questions"] if q["expected_paths"]]
+    assert scored_with_expectations  # sanity: some questions do expect paths
+    for question in scored_with_expectations:
+        assert question["qmd"]["hit"] is False
+    assert report["summary"]["qmd_hit_rate"] == 0.0
+    # Codex Round 1: this run's shape -- QMD returned real hits every
+    # question, none ever landed in scope -- is exactly the "looks like a
+    # bad score but is actually a config error" signature. ``False`` here
+    # is the whole point of the diagnostic: it must not silently read the
+    # same as a genuine 0.0 hit rate.
+    assert report["qmd_scope_overlap"] is False
+
+
+def test_qmd_scope_overlap_is_true_once_any_raw_hit_lands_in_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A correctly-scoped, ordinary comparison must read as ``True``.
+
+    Guards the other direction of the Round 1 diagnostic: it must not fire
+    (or worse, force ``False``) on a run that is behaving normally.
+    """
+
+    def fake_run_qmd_query(query, *, config, top_k):
+        return QmdQueryResult(
+            raw_paths=("Core/note.md",), paths=("Core/note.md",), hits=()
+        )
+
+    monkeypatch.setattr("benchmarks.shadow.run_qmd_query", fake_run_qmd_query)
+
+    config = _qmd_config(corpus_paths=frozenset({"Core/note.md"}))
+    report = _run(qmd_config=config)
+
+    assert report["qmd_compared"] is True
+    assert report["qmd_scope_overlap"] is True
+
+
+def test_qmd_scope_overlap_is_none_when_qmd_never_returns_any_raw_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely empty QMD answer is not a scope-mismatch signal.
+
+    When QMD itself never returns anything (``raw_paths`` always empty),
+    there is nothing to tell a scope mismatch apart from an honest "QMD
+    found nothing for any of these queries" -- the diagnostic must stay
+    ``None`` rather than guessing ``False``.
+    """
+
+    def fake_run_qmd_query(query, *, config, top_k):
+        return QmdQueryResult(raw_paths=(), paths=(), hits=())
+
+    monkeypatch.setattr("benchmarks.shadow.run_qmd_query", fake_run_qmd_query)
+
+    config = _qmd_config(corpus_paths=frozenset({"Core/note.md"}))
+    report = _run(qmd_config=config)
+
+    assert report["qmd_compared"] is True
+    assert report["qmd_scope_overlap"] is None
+
+
+def test_qmd_token_cost_total_matches_the_whitespace_proxy_computation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pins an exact, non-trivial number -- catches a hardcoded 0 or a
+    hardcoded constant the same way ``test_token_cost_is_whitespace_split_
+    and_labeled_accordingly`` pins the lexical/vector side.
+    """
+    note_dir = tmp_path / "Core"
+    note_dir.mkdir()
+    body = "alpha beta gamma delta epsilon"  # 5 whitespace tokens
+    (note_dir / "note.md").write_text(
+        f"---\nprivacy: internal\n---\n\n{body}\n", encoding="utf-8"
+    )
+
+    def fake_run_qmd_query(query, *, config, top_k):
+        # Every question "finds" the same one real note -- lets this test
+        # pin the total to exactly 5 tokens * len(QUESTIONS) questions.
+        return QmdQueryResult(
+            raw_paths=("Core/note.md",), paths=("Core/note.md",), hits=()
+        )
+
+    monkeypatch.setattr("benchmarks.shadow.run_qmd_query", fake_run_qmd_query)
+
+    config = _qmd_config(wiki_root=tmp_path, corpus_paths=frozenset({"Core/note.md"}))
+    report = _run(qmd_config=config)
+
+    expected_total = len(body.split()) * len(QUESTIONS)
+    assert report["summary"]["qmd_token_cost_total"] == expected_total
+    for question in report["questions"]:
+        assert question["qmd"]["token_cost"] == len(body.split())
+
+
+def test_qmd_report_never_contains_the_real_note_body_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The token-cost read must count and discard, never surface the body.
+
+    Complements ``test_qmd_token_cost_never_writes_any_file`` in
+    ``test_qmd_adapter.py`` (which proves nothing is written to disk) by
+    proving the *other* direction: nothing the read touches ends up
+    serialized into the report this module returns, the same shape as the
+    existing ``test_no_sentinel_or_non_public_path_ever_reaches_the_report``
+    guard for the synthetic corpus.
+    """
+    note_dir = tmp_path / "Core"
+    note_dir.mkdir()
+    sentinel = "SENTINEL-QMD-BODY-TOKEN-SHOULD-NEVER-LEAK"
+    (note_dir / "note.md").write_text(
+        f"---\nprivacy: internal\n---\n\n{sentinel}\n", encoding="utf-8"
+    )
+
+    def fake_run_qmd_query(query, *, config, top_k):
+        return QmdQueryResult(
+            raw_paths=("Core/note.md",), paths=("Core/note.md",), hits=()
+        )
+
+    monkeypatch.setattr("benchmarks.shadow.run_qmd_query", fake_run_qmd_query)
+
+    config = _qmd_config(wiki_root=tmp_path, corpus_paths=frozenset({"Core/note.md"}))
+    report = _run(qmd_config=config)
+
+    rendered = json.dumps(report, ensure_ascii=False)
+    assert sentinel not in rendered
+    # And nothing was written back to the checkout either.
+    assert list((tmp_path / "Core").iterdir()) == [tmp_path / "Core" / "note.md"]
