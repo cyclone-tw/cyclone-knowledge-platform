@@ -17,10 +17,18 @@ from conftest import REPO_ROOT, iter_repo_files
 # A synthetic fixture may legitimately carry Cyclone Profile frontmatter, so
 # the guard is about the *privacy class*, not about frontmatter existing.
 # Privacy classes that may never appear in this repo in any form:
+#
+# `internal` joined this list for issue #23 (D5/RP1 hardening): a survey of
+# the whole Cyclone-Wiki `Core/` tree found zero notes declaring `public` --
+# 145 `internal`, 3 `sensitive`, 2 `student-private`. Leaving `internal` off
+# this list would in practice permit any real note into this repo, which
+# defeats the guard's own stated purpose ("Fixtures are synthetic or
+# public"). `public` remains the only privacy class this repo may carry.
 FORBIDDEN_PRIVACY_VALUES = (
     "student-private",
     "restricted",
     "sensitive",
+    "internal",
 )
 
 _PRIVACY_LINE = re.compile(
@@ -83,3 +91,24 @@ def test_guard_detects_a_planted_note(tmp_path) -> None:
     benign_found = [m.group("value") for m in _PRIVACY_LINE.finditer(benign_block)]
     assert benign_found == ["public"]
     assert not set(benign_found) & set(FORBIDDEN_PRIVACY_VALUES)
+
+
+def test_guard_detects_a_planted_internal_note(tmp_path) -> None:
+    """Issue #23 hardening: `internal` must trip the same matcher.
+
+    A real Cyclone-Wiki note vendored into this repo would almost always
+    declare `internal`, not `student-private` -- the survey behind adding
+    `internal` to ``FORBIDDEN_PRIVACY_VALUES`` found zero `public` notes in
+    Core. This is the mutation check for that specific addition: removing
+    `internal` from the tuple must turn this red.
+    """
+    planted = tmp_path / "planted-internal.md"
+    planted.write_text(
+        "---\ntype: Procedure\nprivacy: internal\n---\n\n# planted\n",
+        encoding="utf-8",
+    )
+    block = _frontmatter(planted.read_text(encoding="utf-8"))
+    assert block is not None
+    found = [m.group("value") for m in _PRIVACY_LINE.finditer(block)]
+    assert "internal" in found
+    assert "internal" in FORBIDDEN_PRIVACY_VALUES

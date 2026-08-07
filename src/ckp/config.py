@@ -210,6 +210,23 @@ class Config:
     def server_port(self) -> int:
         return self.get("server", "port")
 
+    @property
+    def pilot_wiki_root(self) -> Path | None:
+        """The real Wiki checkout root for the pilot corpus, or ``None``.
+
+        Empty is the deliberate "not configured" sentinel, same pattern as
+        ``profile.expected_version``. Unlike ``bundle.root`` this is not
+        resolved eagerly at load time: a missing pilot checkout is a P1
+        binding-time failure (D5), not a service-startup failure, because the
+        rest of this package must keep working with no pilot corpus at all.
+        """
+        raw = self.get("pilot", "wiki_root")
+        return Path(raw).expanduser() if raw else None
+
+    @property
+    def pilot_manifest_path(self) -> Path:
+        return Path(self.get("pilot", "manifest_path")).expanduser()
+
 
 def load_config(
     config_file: str | Path | None = None,

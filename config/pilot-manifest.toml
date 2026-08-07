@@ -1,0 +1,41 @@
+# Frozen pilot corpus manifest -- Epic #21 D2, issue #23.
+#
+# Six explicit relative paths into the real Cyclone-Wiki `Core/` checkout,
+# each pinned to the sha256 of its exact bytes at the moment D2 froze the
+# corpus. This file names no absolute host path and holds no note body --
+# only where a note lives inside the checkout and what its bytes must hash
+# to (issue #23 acceptance: "manifest 只存 relative path + content hash").
+#
+# `src/ckp/pilot/manifest.py::load_frozen_manifest` requires these six
+# `relative_path` values to equal `PILOT_NOTE_PATHS` verbatim and in order
+# (RP4). Adding a seventh entry or a pattern here does not expand the pilot
+# corpus -- it fails the binding, because the code-side allowlist is the
+# actual boundary, not this file.
+#
+# Re-freezing (the underlying note legitimately changed upstream) is a
+# reviewed PR that updates both `PILOT_NOTE_PATHS`-adjacent hash below and
+# this file together, never an automated rewrite.
+
+[[note]]
+relative_path = "Core/procedure-agent-wiki-note-retrieval.md"
+content_sha256 = "fa967de6c81391e6ba0ab06f6c31e6f6e0056f9d9ea7b79be47e8c28609c8b6a"
+
+[[note]]
+relative_path = "Core/procedure-agent-memory-read-scopes.md"
+content_sha256 = "aa1e17348b3fcdfe9a487bb7d033690411bdd2bb0d10a38178b028692b108f7a"
+
+[[note]]
+relative_path = "Core/decision-cyclone-wiki-openwiki-role-boundary.md"
+content_sha256 = "b0ea877d5d2231e0ddc6a0dacbb434a703cc647ae56432105121e8a1b047ee8a"
+
+[[note]]
+relative_path = "Core/project-cyclone-okf-knowledge-contract.md"
+content_sha256 = "01960e541c29f57b758a5c83bb2cd1a4e6d0c9939c06c768a5b37acaf46e8c58"
+
+[[note]]
+relative_path = "Core/_inbox/agent-captures/2026-07-04-relayapi-repo-analysis.md"
+content_sha256 = "9c37c2edae09214c80d3d45fd58e4ed56c7624e1cd90354d0fb92b616dd3de8d"
+
+[[note]]
+relative_path = "Core/_inbox/agent-captures/2026-06-23-hermes-os-2-100-stars-loops.md"
+content_sha256 = "973b1004d07b0ee0aafe9c1989cb2778b0ee442de3aa979e5b72a14f97b98fcd"
