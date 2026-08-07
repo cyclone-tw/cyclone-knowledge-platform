@@ -87,6 +87,52 @@ def test_load_frozen_manifest_rejects_paths_that_drift_from_the_allowlist(
         load_frozen_manifest(config)
 
 
+@pytest.mark.parametrize(
+    "extra_key,extra_value",
+    [
+        ("body", '"leaked content"'),
+        ("content", '"leaked content"'),
+        ("privacy", '"public"'),
+        ("note_body_b64", '"bGVha2Vk"'),
+    ],
+)
+def test_load_frozen_manifest_rejects_any_undeclared_note_field(
+    tmp_path,
+    extra_key: str,
+    extra_value: str,
+) -> None:
+    """RP1 at the file-format layer, not just the dataclass layer.
+
+    `PilotManifestEntry` has no `body` field, so a naive schema loader would
+    silently *accept and ignore* a manifest carrying one -- and a manifest
+    file that can carry `body = "..."` at all means RP1 was never actually
+    enforced on the file format, only on the in-memory type (Codex review
+    finding). Every real `[[note]]` key here is otherwise valid.
+
+    Parametrised beyond `body` on purpose: the rule is "no undeclared key",
+    not "no key literally named body". A loader hardened only against the
+    one field this review happened to name would pass a body-only test while
+    still accepting `content` or a base64 smuggling field.
+    """
+    manifest_file = tmp_path / "pilot-manifest.toml"
+    lines = "\n".join(
+        f'[[note]]\nrelative_path = "{path}"\ncontent_sha256 = "{"0" * 64}"'
+        + (f"\n{extra_key} = {extra_value}" if index == 0 else "")
+        for index, path in enumerate(PILOT_NOTE_PATHS)
+    )
+    manifest_file.write_text(lines + "\n", encoding="utf-8")
+
+    config = load_config(env={"CKP_PILOT_MANIFEST_PATH": str(manifest_file)})
+    with pytest.raises(PilotBindingError) as excinfo:
+        load_frozen_manifest(config)
+    message = str(excinfo.value)
+    # Match the offending key, not the boilerplate: the error text explains
+    # the rule with `body` as its example, so `match="body"` would pass for
+    # every parameter regardless of which key actually tripped the check.
+    assert repr(extra_key) in message, message
+    assert "#0" in message
+
+
 def test_bind_pilot_corpus_rejects_an_injected_manifest_outside_the_allowlist(
     tmp_path,
 ) -> None:

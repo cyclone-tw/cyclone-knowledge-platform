@@ -90,6 +90,16 @@ class PilotManifestEntry:
     content_sha256: str
 
 
+# The strict schema for a `[[note]]` table in the frozen manifest file --
+# kept next to PilotManifestEntry deliberately, so a future field added to
+# one and not the other is a visible diff, not a silent gap. A manifest file
+# with any other key (e.g. `body = "..."`) is rejected outright: accepting
+# and ignoring an extra field is not the same as refusing it (Codex review
+# finding -- "accepted and ignored" left the file-format layer of RP1
+# unguarded even though PilotManifestEntry itself never gained the field).
+_ALLOWED_NOTE_KEYS = frozenset({"relative_path", "content_sha256"})
+
+
 @dataclass(frozen=True)
 class PilotManifest:
     entries: tuple[PilotManifestEntry, ...]
@@ -177,18 +187,34 @@ def load_frozen_manifest(config: Config) -> PilotManifest:
     if not isinstance(notes, list) or not notes:
         raise PilotBindingError(f"{manifest_path}: missing [[note]] entries")
 
-    try:
-        entries = tuple(
-            PilotManifestEntry(
-                relative_path=note["relative_path"],
-                content_sha256=note["content_sha256"],
+    entries = []
+    for index, note in enumerate(notes):
+        if not isinstance(note, dict):
+            raise PilotBindingError(
+                f"{manifest_path}: [[note]] #{index} is not a table"
             )
-            for note in notes
-        )
-    except (KeyError, TypeError) as exc:
-        raise PilotBindingError(
-            f"{manifest_path}: each [[note]] needs relative_path and content_sha256"
-        ) from exc
+        unknown = sorted(set(note) - _ALLOWED_NOTE_KEYS)
+        if unknown:
+            raise PilotBindingError(
+                f"{manifest_path}: [[note]] #{index} has field(s) {unknown!r} "
+                f"this schema does not define; only {sorted(_ALLOWED_NOTE_KEYS)!r} "
+                "are allowed -- a manifest field the code silently ignores "
+                "(e.g. an extra `body`) is exactly the RP1 hole this refuses "
+                "rather than accepts-and-ignores"
+            )
+        try:
+            entries.append(
+                PilotManifestEntry(
+                    relative_path=note["relative_path"],
+                    content_sha256=note["content_sha256"],
+                )
+            )
+        except (KeyError, TypeError) as exc:
+            raise PilotBindingError(
+                f"{manifest_path}: [[note]] #{index} needs relative_path and "
+                "content_sha256"
+            ) from exc
+    entries = tuple(entries)
 
     manifest = PilotManifest(entries=entries)
     _enforce_allowlist(manifest, source=str(manifest_path))
