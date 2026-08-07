@@ -10,6 +10,8 @@ smoke check (issue #23 "Runtime smoke"), outside pytest.
 from __future__ import annotations
 
 import hashlib
+import json
+import re
 
 import pytest
 
@@ -88,6 +90,100 @@ def test_load_frozen_manifest_rejects_paths_that_drift_from_the_allowlist(
 
 
 @pytest.mark.parametrize(
+    "field,value,marker",
+    [
+        ("content_sha256", "LEAKED note body pretending to be a hash", "LEAKED"),
+        ("content_sha256", "f" * 63, None),
+        ("relative_path", "LEAKED\nnote body\nwith newlines", "LEAKED"),
+        ("relative_path", "x" * 301, None),
+        ("content_sha256", "f" * 64 + "\n", None),
+        ("relative_path", "Core/AGENTS.md\n", None),
+    ],
+    ids=[
+        "sha-freeform",
+        "sha-63-hex",
+        "path-newlines",
+        "path-overlong",
+        "sha-trailing-newline",
+        "path-trailing-newline",
+    ],
+)
+def test_format_invalid_string_values_are_refused_without_echo(
+    tmp_path, field: str, value: str, marker: str | None
+) -> None:
+    """Codex round 2 on #36: a *string* can smuggle content too.
+
+    Downstream diagnostics echo manifest-derived values (the RP4 mismatch
+    echoes found paths, the hash-drift error echoes the pinned hash), so the
+    string type check alone left the echoes as a leak path. Format validation
+    before any echo is what makes them safe: a 64-hex hash and a bounded
+    path shape cannot carry a body. Format-invalid values are refused and --
+    the actual point -- never repeated in the message.
+    """
+    manifest_file = tmp_path / "pilot-manifest.toml"
+    lines = []
+    for index, path in enumerate(PILOT_NOTE_PATHS):
+        rp = value if (index == 0 and field == "relative_path") else path
+        sha = value if (index == 0 and field == "content_sha256") else "0" * 64
+        # json.dumps produces valid TOML basic-string escaping (\n etc.);
+        # repr or raw interpolation breaks on newline-bearing values, since a
+        # literal newline inside a TOML basic string is invalid TOML.
+        lines.append(
+            "[[note]]\nrelative_path = "
+            + json.dumps(rp)
+            + "\ncontent_sha256 = "
+            + json.dumps(sha)
+        )
+    manifest_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    config = load_config(env={"CKP_PILOT_MANIFEST_PATH": str(manifest_file)})
+    with pytest.raises(PilotBindingError) as excinfo:
+        load_frozen_manifest(config)
+    message = str(excinfo.value)
+    assert field in message
+    if marker is not None:
+        assert marker not in message  # the value itself must never be echoed
+
+
+@pytest.mark.parametrize(
+    "value_toml,type_name",
+    [
+        ('{ body = "leaked note body" }', "dict"),
+        ('["leaked", "note", "body"]', "list"),
+        ("42", "int"),
+    ],
+    ids=["inline-table", "array", "int"],
+)
+def test_load_frozen_manifest_rejects_non_string_field_values(
+    tmp_path, value_toml: str, type_name: str
+) -> None:
+    """The third layer of the same hole (Codex round 1 on #36).
+
+    #33 guarded the note-level keys, this ticket guarded the top-level keys,
+    and a TOML *value* was still a place to smuggle content: an inline table
+    under an allowed key passed both allowlists. Values must be plain
+    strings, and the refusal must not echo the value -- the manifest sits
+    outside the Markdown privacy scanner, so an error message that repeats
+    the payload is itself a leak path.
+    """
+    manifest_file = tmp_path / "pilot-manifest.toml"
+    lines = "\n".join(
+        f'[[note]]\nrelative_path = "{path}"\ncontent_sha256 = '
+        + (value_toml if index == 0 else f'"{"0" * 64}"')
+        for index, path in enumerate(PILOT_NOTE_PATHS)
+    )
+    manifest_file.write_text(lines + "\n", encoding="utf-8")
+
+    config = load_config(env={"CKP_PILOT_MANIFEST_PATH": str(manifest_file)})
+    with pytest.raises(PilotBindingError) as excinfo:
+        load_frozen_manifest(config)
+    message = str(excinfo.value)
+    assert "content_sha256" in message
+    assert type_name in message
+    assert "leaked" not in message  # the value itself must never be echoed
+
+
+@pytest.mark.parametrize(
     "extra_key,extra_value",
     [
         ("body", '"leaked content"'),
@@ -126,11 +222,69 @@ def test_load_frozen_manifest_rejects_any_undeclared_note_field(
     with pytest.raises(PilotBindingError) as excinfo:
         load_frozen_manifest(config)
     message = str(excinfo.value)
-    # Match the offending key, not the boilerplate: the error text explains
-    # the rule with `body` as its example, so `match="body"` would pass for
-    # every parameter regardless of which key actually tripped the check.
-    assert repr(extra_key) in message, message
+    # Round 4: key names are withheld -- a quoted TOML key legally carries
+    # arbitrary content, so echoing the name is the same leak as echoing a
+    # value. Each parametrised key still proves the guard trips on it (that
+    # is what keeps a blocks-only-`body` implementation red), and the message
+    # must not contain the planted name.
+    # Word-boundary match, not substring: `content` legitimately appears
+    # inside `content_sha256` in the (repo-public) allowed list. A leak would
+    # echo the key as a standalone token.
+    assert not re.search(
+        rf"(?<![A-Za-z0-9_]){re.escape(extra_key)}(?![A-Za-z0-9_])", message
+    ), message
+    assert "names withheld" in message
     assert "#0" in message
+
+
+@pytest.mark.parametrize(
+    "extra_key,extra_value",
+    [
+        ("body", '"leaked note body"'),
+        ("content", '"leaked note body"'),
+        ("privacy", '"public"'),
+        ("note_body_b64", '"bGVha2Vk"'),
+    ],
+)
+def test_load_frozen_manifest_rejects_any_undeclared_top_level_field(
+    tmp_path,
+    extra_key: str,
+    extra_value: str,
+) -> None:
+    """RP1 at the file-format layer, one level above `[[note]]` (issue #36).
+
+    PR #33 hardened the schema inside each `[[note]]` table but left the
+    manifest file's top level unguarded: Codex Round 2 found that a bare
+    `body = "leaked note body"` line at the top of `pilot-manifest.toml`
+    still loaded successfully, because it never reaches the `[[note]]` loop
+    at all. Every real `[[note]]` entry here is otherwise valid.
+
+    Parametrised beyond `body` on purpose, same reasoning as the `[[note]]`
+    field test above: the rule is "no undeclared top-level key", not "no key
+    literally named body". A loader hardened only against the one field this
+    review happened to name would pass a body-only test while still
+    accepting `content` or a base64 smuggling field at the top level.
+    """
+    manifest_file = tmp_path / "pilot-manifest.toml"
+    notes = "\n".join(
+        f'[[note]]\nrelative_path = "{path}"\ncontent_sha256 = "{"0" * 64}"'
+        for path in PILOT_NOTE_PATHS
+    )
+    manifest_file.write_text(
+        f"{extra_key} = {extra_value}\n\n{notes}\n", encoding="utf-8"
+    )
+
+    config = load_config(env={"CKP_PILOT_MANIFEST_PATH": str(manifest_file)})
+    with pytest.raises(PilotBindingError) as excinfo:
+        load_frozen_manifest(config)
+    message = str(excinfo.value)
+    # Round 4: withheld on purpose -- a quoted TOML key carries a payload, so
+    # the name is attacker bytes. Parametrisation keeps a blocks-only-`body`
+    # implementation red; the message must not repeat the planted name.
+    assert not re.search(
+        rf"(?<![A-Za-z0-9_]){re.escape(extra_key)}(?![A-Za-z0-9_])", message
+    ), message
+    assert "names withheld" in message
 
 
 def test_bind_pilot_corpus_rejects_an_injected_manifest_outside_the_allowlist(

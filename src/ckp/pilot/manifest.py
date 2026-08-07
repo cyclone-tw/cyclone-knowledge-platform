@@ -99,6 +99,26 @@ class PilotManifestEntry:
 # unguarded even though PilotManifestEntry itself never gained the field).
 _ALLOWED_NOTE_KEYS = frozenset({"relative_path", "content_sha256"})
 
+# The strict schema for the manifest file's *top level* -- the same
+# discipline as `_ALLOWED_NOTE_KEYS`, one level up (issue #36). PR #33 only
+# guarded keys inside `[[note]]` tables; Codex Round 2 found that a top-level
+# `body = "leaked note body"` (a key that is not `note` at all, so it never
+# reaches the per-entry loop below) still loaded successfully. Accepting and
+# ignoring an undeclared top-level key is the same RP1 hole one layer up.
+_ALLOWED_TOP_LEVEL_KEYS = frozenset({"note"})
+
+#: Codex round 2 on #36: a *string* value is still a smuggling vehicle,
+#: because two downstream diagnostics echo manifest-derived values (the RP4
+#: allowlist mismatch echoes the found paths; the hash-drift error echoes the
+#: pinned hash). The rule that makes those echoes safe is format validation
+#: BEFORE any echo: a 64-hex string cannot carry a payload, and a bounded
+#: path-shaped string cannot carry a note body. Anything format-invalid is
+#: refused *without being repeated*.
+# fullmatch() below, not match()+anchors: a Python `$` also matches just
+# before a trailing newline, so "hash\n" would have slipped through.
+_SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
+_RELATIVE_PATH_RE = re.compile(r"[A-Za-z0-9._/-]{1,300}")
+
 
 @dataclass(frozen=True)
 class PilotManifest:
@@ -183,6 +203,19 @@ def load_frozen_manifest(config: Config) -> PilotManifest:
             f"frozen pilot manifest {manifest_path} is not valid TOML: {exc}"
         ) from exc
 
+    unknown_top_level = set(parsed) - _ALLOWED_TOP_LEVEL_KEYS
+    if unknown_top_level:
+        # Codex round 4 on #36: a TOML *quoted key* legally carries arbitrary
+        # content ("LEAKED note body" = "x"), so key names are attacker bytes
+        # too and are deliberately not echoed -- count and allowed set only,
+        # same principle as the value diagnostics above.
+        raise PilotBindingError(
+            f"{manifest_path}: {len(unknown_top_level)} top-level field(s) "
+            f"this schema does not define (names withheld -- a quoted TOML "
+            f"key can carry a payload); only "
+            f"{sorted(_ALLOWED_TOP_LEVEL_KEYS)!r} are allowed"
+        )
+
     notes = parsed.get("note")
     if not isinstance(notes, list) or not notes:
         raise PilotBindingError(f"{manifest_path}: missing [[note]] entries")
@@ -193,27 +226,58 @@ def load_frozen_manifest(config: Config) -> PilotManifest:
             raise PilotBindingError(
                 f"{manifest_path}: [[note]] #{index} is not a table"
             )
-        unknown = sorted(set(note) - _ALLOWED_NOTE_KEYS)
+        unknown = set(note) - _ALLOWED_NOTE_KEYS
         if unknown:
             raise PilotBindingError(
-                f"{manifest_path}: [[note]] #{index} has field(s) {unknown!r} "
-                f"this schema does not define; only {sorted(_ALLOWED_NOTE_KEYS)!r} "
-                "are allowed -- a manifest field the code silently ignores "
-                "(e.g. an extra `body`) is exactly the RP1 hole this refuses "
-                "rather than accepts-and-ignores"
+                f"{manifest_path}: [[note]] #{index} has {len(unknown)} "
+                f"field(s) this schema does not define (names withheld -- a "
+                f"quoted TOML key can carry a payload); only "
+                f"{sorted(_ALLOWED_NOTE_KEYS)!r} are allowed"
             )
         try:
-            entries.append(
-                PilotManifestEntry(
-                    relative_path=note["relative_path"],
-                    content_sha256=note["content_sha256"],
-                )
-            )
+            relative_path = note["relative_path"]
+            content_sha256 = note["content_sha256"]
         except (KeyError, TypeError) as exc:
             raise PilotBindingError(
                 f"{manifest_path}: [[note]] #{index} needs relative_path and "
                 "content_sha256"
             ) from exc
+        # Codex round 1 on #36: key checking alone left a third layer open --
+        # TOML values can be inline tables, so `content_sha256 = { body =
+        # "..." }` passed the key allowlist while carrying a payload. The
+        # value must be a plain string; anything else is refused *without
+        # echoing the value* (a manifest is outside the Markdown privacy
+        # scanner's reach, so an error message is a leak path too).
+        for field_name, value, pattern, shape in (
+            ("relative_path", relative_path, _RELATIVE_PATH_RE, "a bounded path"),
+            (
+                "content_sha256",
+                content_sha256,
+                _SHA256_HEX_RE,
+                "64 lowercase hex chars",
+            ),
+        ):
+            if not isinstance(value, str):
+                raise PilotBindingError(
+                    f"{manifest_path}: [[note]] #{index} field {field_name!r} "
+                    f"must be a string, got {type(value).__name__} -- a "
+                    "non-string value is a place to smuggle content, and its "
+                    "contents are deliberately not repeated here"
+                )
+            if not pattern.fullmatch(value):
+                raise PilotBindingError(
+                    f"{manifest_path}: [[note]] #{index} field {field_name!r} "
+                    f"is not {shape} -- a free-form string is a place to "
+                    "smuggle content, and every later diagnostic on this data "
+                    "path echoes field values, so a format-invalid one is "
+                    "refused without being repeated"
+                )
+        entries.append(
+            PilotManifestEntry(
+                relative_path=relative_path,
+                content_sha256=content_sha256,
+            )
+        )
     entries = tuple(entries)
 
     manifest = PilotManifest(entries=entries)

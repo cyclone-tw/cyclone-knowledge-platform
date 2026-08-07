@@ -49,6 +49,19 @@ def _frontmatter(text: str) -> str | None:
     return text[3:end]
 
 
+def _display_path(path: Path) -> str:
+    """Render ``path`` relative to ``REPO_ROOT`` when it lives under it.
+
+    Paths outside ``REPO_ROOT`` (the planted-note regression tests below use
+    ``tmp_path`` fixtures) fall back to the path as given -- there is no
+    relative form to show, and forcing one would raise.
+    """
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def _scan_offenders(paths: Iterable[Path]) -> list[str]:
     """The actual scanner. Both the repo-wide test and the planted-note
     regression tests below call this same function -- a planted-note test
@@ -56,6 +69,10 @@ def _scan_offenders(paths: Iterable[Path]) -> list[str]:
     while the real scanner is broken (Codex review finding on this file:
     the previous version of the `internal` regression test only asserted
     tuple membership, never exercised this function at all).
+
+    Offender strings show paths relative to ``REPO_ROOT`` (issue #36 --
+    the message previously showed absolute paths, which disagreed with the
+    calling test's own "paths shown relative to ..." wording).
     """
     offenders: list[str] = []
     for path in paths:
@@ -66,7 +83,7 @@ def _scan_offenders(paths: Iterable[Path]) -> list[str]:
         for match in _PRIVACY_LINE.finditer(block):
             value = match.group("value")
             if value in FORBIDDEN_PRIVACY_VALUES:
-                offenders.append(f"{path}: privacy: {value}")
+                offenders.append(f"{_display_path(path)}: privacy: {value}")
     return offenders
 
 
