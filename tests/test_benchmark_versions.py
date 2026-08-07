@@ -37,9 +37,9 @@ from typing import Any
 from benchmarks.questions import (
     CORPUS,
     CORPUS_VERSION,
+    PILOT_QUESTIONS,
     QUESTION_SET_VERSION,
     QUESTIONS,
-    REAL_QUESTIONS,
 )
 
 
@@ -72,7 +72,7 @@ _CORPUS_FINGERPRINTS_BY_VERSION: dict[str, str] = {
     "3": "162357bd35009399717ddce6a27a29f676fb2fa2ae1e8f1c250371b6dc463c10",
 }
 
-#: {QUESTION_SET_VERSION: fingerprint of QUESTIONS + REAL_QUESTIONS at that
+#: {QUESTION_SET_VERSION: fingerprint of PILOT_QUESTIONS at that
 #: version}. Same update rule as above, but for question content.
 _QUESTION_SET_FINGERPRINTS_BY_VERSION: dict[str, str] = {
     "2": "4a7159150ceb2019a5167f9ff09c7f89e2768e11f9b392bb103659f576724af5",
@@ -100,7 +100,7 @@ def test_corpus_content_matches_pinned_corpus_version() -> None:
 
 
 def test_question_set_content_matches_pinned_question_set_version() -> None:
-    actual = _content_fingerprint(QUESTIONS + REAL_QUESTIONS)
+    actual = _content_fingerprint(PILOT_QUESTIONS)
     expected = _QUESTION_SET_FINGERPRINTS_BY_VERSION.get(QUESTION_SET_VERSION)
     assert expected is not None, (
         f"QUESTION_SET_VERSION={QUESTION_SET_VERSION!r} has no pinned "
@@ -126,7 +126,7 @@ def test_corpus_and_question_set_versions_are_independent() -> None:
     nothing here should ever couple them.
     """
     corpus_fp = _content_fingerprint(CORPUS)
-    question_fp = _content_fingerprint(QUESTIONS + REAL_QUESTIONS)
+    question_fp = _content_fingerprint(PILOT_QUESTIONS)
     assert corpus_fp != question_fp, (
         "CORPUS and QUESTIONS+REAL_QUESTIONS fingerprints collided, which "
         "would make it impossible to tell the two apart; this almost "
