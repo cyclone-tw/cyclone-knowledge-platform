@@ -52,6 +52,23 @@ guessed:
   ``reason: "unknown"``, never guessed into one of the other two buckets
   (round 2 feedback, point 4).
 
+## Round 3: a non-ancestor is not necessarily "current"
+
+Round 2 review (Codex, correctly) rejected treating a single
+``git merge-base --is-ancestor A B`` call's non-zero exit as proof that
+``A`` is not an ancestor of ``B`` and therefore the export is "current".
+Non-zero covers three different situations that this module must not
+collapse into one: ``A`` genuinely postdates ``B``; the two commits are on
+**diverged** history (neither is an ancestor of the other -- exit 1 either
+way, but "diverged" is not "current"); or ancestry could not be determined
+at all (shallow clone, unknown ref -- exit 128+). :func:`freshness_verdict`
+now checks **both directions** (``is_ancestor(export, note)`` and
+``is_ancestor(note, export)``) and only returns ``"stale"`` or ``"current"``
+when exactly one direction is unambiguously ``True`` and the other
+unambiguously ``False``; every other combination (both ``False`` --
+diverged; either ``None`` -- undeterminable; both ``True`` -- impossible in
+a real DAG, refused rather than trusted) is ``"unknown"``.
+
 ## Report body vs privacy (issue #29 privacy boundary)
 
 The diff report never carries note bodies, excerpts, or metadata *values*
@@ -62,20 +79,49 @@ content), git commit hashes (repository metadata, not note content), and
 metadata *field names* that disagree (``"title"``, ``"status"`` -- never
 the disagreeing strings themselves).
 
-## Known limitation carried over from Round 1, not yet fixed
+## Known limitations carried over from Round 1/2, not yet fixed (tracked: #48)
 
-``metadata_mismatch``'s ``title`` comparison has a definitional gap: every
-``wiki-export.v1`` zone derives its ``title`` field from the note's first
-Markdown ``# `` heading (``wiki_dashboard_export.first_heading_body`` /
-``development_candidates.note_title`` both do this), while this module's
-Catalog side reads the frontmatter ``title:`` field
-(``ckp.catalog.parser.project_member``). A note whose heading text and
-frontmatter title differ will show as ``metadata_mismatch`` even against a
-perfectly fresh export -- that is a comparison of two different fields
-wearing the same name, not evidence of drift. Fixing it needs the Catalog
-side to also expose an h1-derived title, which lives in ``src/ckp/``
-(outside this issue's file ownership); flagged here rather than silently
-producing a false positive category.
+``metadata_mismatch`` compares two fields per zone item (``title``,
+``status``). Both were checked against their actual source in
+``cyclone-wiki``, not assumed to mean the same thing on both sides just
+because the JSON key matches (round 3 feedback, point 2: "不要留一個沒查過
+的欄位在比對裡"):
+
+* ``title`` -- **definitional mismatch, every zone.** Every
+  ``wiki-export.v1`` zone derives ``title`` from the note's first Markdown
+  ``# `` heading (``wiki_dashboard_export.first_heading_body`` /
+  ``development_candidates.note_title`` both do this), while this module's
+  Catalog side reads the frontmatter ``title:`` field
+  (``ckp.catalog.parser.project_member``). A note whose heading text and
+  frontmatter title differ shows as ``metadata_mismatch`` even against a
+  perfectly fresh export -- two different fields wearing the same name.
+* ``status`` -- **definitional mismatch in exactly one zone, checked
+  zone-by-zone, not assumed:**
+
+  * ``projects`` (``wiki_dashboard_export.active_projects``): its
+    ``"status"`` is literally ``fm.get("status", "")`` -- the same
+    frontmatter ``status:`` field the Catalog side reads. Consistent;
+    verified by reading both source functions, not inferred from output.
+  * ``topics`` (``wiki_topics._child_entry``): its ``"status"`` is
+    ``_scalar(metadata, "status")`` -- also the same frontmatter field.
+    Consistent, same reasoning.
+  * ``development_candidates`` (``development_candidates.candidate_record``):
+    its ``"status"`` is ``frontmatter.get("candidate_status", "")`` -- a
+    **different** field (``candidate_status:``, not ``status:``). Both of
+    the two real pilot notes currently matched in the export live in this
+    zone, so this is not a theoretical gap: it is part of why today's real
+    run reports ``metadata_mismatch`` on both of them (their frontmatter
+    ``status: inbox`` will essentially never equal their
+    ``candidate_status:`` value).
+  * ``knowledge_feed`` (``wiki_dashboard_export.note_to_feed_item``) and
+    ``life_domains`` never emit a ``"status"`` key at all -- ``ExportEntry.
+    status`` is ``None`` for those, which this module already treats as
+    "not comparable" rather than a forced mismatch, so no gap there.
+
+Fixing either requires the Catalog side to expose the export's actual
+source field (an h1-derived title, and a zone-aware status source), which
+lives in ``src/ckp/`` (outside this issue's file ownership) -- flagged here
+and in #48 rather than silently producing a false positive category.
 """
 
 from __future__ import annotations
@@ -109,7 +155,7 @@ from ckp.pilot.manifest import (
 )
 from ckp.privacy import FrontmatterClassifier, PrivacyClass, PrivacyGate
 
-REPORT_SCHEMA = "ckp-export-compare-report/2"
+REPORT_SCHEMA = "ckp-export-compare-report/3"
 
 #: Override for where the "current export" lives. Unset means "derive from
 #: the pilot Wiki checkout root", mirroring how Cyclone-Dashboard's own
@@ -333,19 +379,44 @@ _TOPICS_PRIVACY_ALLOWLIST = frozenset(
 def zone_eligibility(facts: NoteFrontmatterFacts) -> tuple[str, ...]:
     """Which ``wiki-export.v1`` zone(s) could *ever* represent this note.
 
-    Path-shape and required-field rules only. Two known narrowings are
-    deliberately not modeled because they are moot for the frozen six-note
-    pilot corpus (D2 restricts it to ``Core/...`` paths only):
+    Path-shape and required-field rules only. **Not a complete mirror** of
+    every selection rule in the three source scripts -- the gaps below are
+    moot for today's frozen six-note pilot corpus (D2 restricts it to
+    ``Core/...`` paths, none of which touch ``Private/`` or carry a
+    ``library_id``), but they are real gaps, not verified-safe
+    simplifications, and must be closed before this function is trusted for
+    a wider corpus (round 3 feedback, point 3: "剛好沒踩到不是規則正確"):
 
     * ``knowledge_feed`` additionally truncates to the 30
       lexicographically-last filenames in its directory
-      (``wiki_dashboard_export.build_export``).
+      (``wiki_dashboard_export.build_export``) -- not modeled.
     * ``life_domains`` additionally keeps only the single
-      lexicographically-last file per domain (same function).
+      lexicographically-last file per domain (same function) -- not
+      modeled.
+    * ``topics`` (``wiki_topics.collect_topics``) has a **second** path
+      into the zone this function does not model at all: a note with *no*
+      ``library_id`` of its own still joins an existing topic's
+      ``children`` list if it lives under the same directory as that
+      topic's hub note. This module never surfaces that as a gap in
+      practice only because :func:`_extract_path_addressable_entries`
+      reads each zone item's top-level ``"path"`` key, and only a topic's
+      *hub* note (one per ``library_id``) gets a top-level ``"path"`` --
+      children live nested inside ``item["children"]``, which this module
+      never reads. So the untested case is not "a note wrongly judged
+      ineligible" but "a note joining topics in a way this module cannot
+      see at all regardless of what this function says" -- a wider pilot
+      corpus that starts asserting on ``children`` would need new code,
+      not just a rule fix here.
+    * ``topics`` also has a privacy-independent exclusion,
+      ``wiki_topics.DENY_PATH_SEGMENTS`` (``{"students",
+      "recording-transcripts"}``, casefolded, checked against every path
+      segment) -- not modeled. None of today's six pilot paths contain
+      either segment.
 
     Neither pilot note lives under ``Private/_inbox/info-collect/`` or
     ``Private/Life/*/reports/`` at all, so path-shape alone already
-    excludes every pilot note from both zones regardless of the cutoff.
+    excludes every pilot note from both truncated zones regardless of the
+    cutoff, and none carry a ``library_id`` or a deny-listed path segment.
     """
     path = PurePosixPath(facts.path)
     parts = path.parts
@@ -547,6 +618,20 @@ def freshness_verdict(
     possibly have seen the note's current content. Any missing or
     ambiguous git signal along the way is ``"unknown"`` (round 2 feedback,
     point 4: "寧可標不明也不要猜一個看起來合理的分類").
+
+    Round 3 fix: a single ``is_ancestor(export_commit, last_touch)`` call
+    returning ``False`` is **not** proof the export is current. ``False``
+    also covers two situations that must not be reported as "current":
+    diverged history (neither commit is an ancestor of the other -- both
+    directions come back ``False``), and undeterminable ancestry (a
+    shallow clone, or a ref git does not recognize -- ``is_ancestor``
+    already reports that as ``None``, not ``False``, but conflating "not
+    an ancestor" with "is a descendant" without checking is exactly how a
+    diverged pair would have been misread as current). This checks
+    **both** directions and only commits to ``"stale"``/``"current"`` when
+    they disagree unambiguously; everything else -- including the
+    impossible-in-a-real-DAG case of both directions reporting ``True`` --
+    is ``"unknown"`` rather than trusted.
     """
     if not export_commit:
         return "unknown"
@@ -555,10 +640,19 @@ def freshness_verdict(
         return "unknown"
     if last_touch == export_commit:
         return "current"
-    ancestor = git_ops.is_ancestor(export_commit, last_touch)
-    if ancestor is None:
-        return "unknown"
-    return "stale" if ancestor else "current"
+
+    export_predates_note = git_ops.is_ancestor(export_commit, last_touch)
+    note_predates_export = git_ops.is_ancestor(last_touch, export_commit)
+
+    if export_predates_note is True and note_predates_export is False:
+        return "stale"
+    if note_predates_export is True and export_predates_note is False:
+        return "current"
+    # Either query came back None (undeterminable: shallow clone, unknown
+    # ref), or both came back False (diverged history), or both came back
+    # True (impossible for two distinct commits in an acyclic history --
+    # refused rather than trusted). None of these license a guess.
+    return "unknown"
 
 
 def _classify_missing(
@@ -746,27 +840,36 @@ def diff_export_against_catalog(
         if len(matches) > 1:
             facts = facts_by_path.get(pilot_path)
             eligible = zone_eligibility(facts) if facts is not None else ()
-            extra_zones = [m.zone for m in matches[1:]]
-            extra_reasons = [
+            # Round 3 fix: check *every* match, including `primary`
+            # (matches[0]) -- not just matches[1:]. A prior version only
+            # validated the zones beyond the first, so a primary
+            # representation sitting in a zone this note is not eligible
+            # for went unflagged entirely (non-blocking finding #1). Which
+            # match is "primary" (used for the title/status comparison
+            # below) is still whichever sorts first in
+            # PATH_ADDRESSABLE_ZONES order -- that positional choice is
+            # unrelated to whether any given zone is legitimate.
+            all_zones = [m.zone for m in matches]
+            all_reasons = [
                 "duplicate_in_eligible_zone"
                 if zone in eligible
                 else "zone_not_eligible"
-                for zone in extra_zones
+                for zone in all_zones
             ]
             diffs.append(
                 {
                     "category": "extra_in_export",
                     "path": pilot_path,
-                    "zones": extra_zones,
-                    "reasons": extra_reasons,
+                    "zones": all_zones,
+                    "reasons": all_reasons,
                     "detail": (
-                        f"{len(matches) - 1} duplicate zone entr"
-                        f"{'y' if len(matches) == 2 else 'ies'} beyond the "
-                        "first representation -- 'duplicate_in_eligible_zone' "
-                        "means the note legitimately qualifies for that zone "
-                        "too, 'zone_not_eligible' means the export placed it "
-                        "somewhere wiki_dashboard_export.py's own rules "
-                        "would never put it"
+                        f"{len(matches)} zone representations for one "
+                        "Catalog concept -- 'duplicate_in_eligible_zone' "
+                        "means the note legitimately qualifies for that "
+                        "zone too, 'zone_not_eligible' means the export "
+                        "placed it somewhere wiki_dashboard_export.py's own "
+                        "rules would never put it (checked for every "
+                        "representation, including the first)"
                     ),
                 }
             )

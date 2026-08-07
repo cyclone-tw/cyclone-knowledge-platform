@@ -344,17 +344,25 @@ def test_freshness_current_when_last_touch_equals_export_commit() -> None:
 def test_freshness_stale_when_export_commit_is_ancestor_of_last_touch() -> None:
     git_ops = _FakeGitOps(
         last_touch={"Core/x.md": "newcommit"},
-        ancestry={("oldcommit", "newcommit"): True},
+        ancestry={
+            ("oldcommit", "newcommit"): True,
+            ("newcommit", "oldcommit"): False,  # reverse direction, checked too
+        },
     )
     assert freshness_verdict(git_ops, "oldcommit", "Core/x.md") == "stale"
 
 
 def test_freshness_current_when_export_commit_is_not_an_ancestor() -> None:
     """The note's last-touch commit already predates (or equals a sibling
-    of) the export commit -- the export is not stale relative to it."""
+    of) the export commit -- the export is not stale relative to it. Both
+    directions must be supplied (round 3): a single `False` alone is not
+    enough to conclude "current"."""
     git_ops = _FakeGitOps(
         last_touch={"Core/x.md": "oldcommit"},
-        ancestry={("newcommit", "oldcommit"): False},
+        ancestry={
+            ("newcommit", "oldcommit"): False,
+            ("oldcommit", "newcommit"): True,  # reverse direction, checked too
+        },
     )
     assert freshness_verdict(git_ops, "newcommit", "Core/x.md") == "current"
 
@@ -410,6 +418,86 @@ def test_subprocess_git_ops_against_a_real_temporary_repo(tmp_path) -> None:
     assert freshness_verdict(git_ops, second_commit, "Core/a.md") == "current"
 
 
+def test_subprocess_git_ops_diverged_history_is_unknown_not_current(tmp_path) -> None:
+    """Round 3 blocking finding: a single ``is_ancestor(export, note)``
+    call returning False used to be read as "current". Real diverged
+    history (a "人造分歧歷史", per the round 3 feedback's own suggested
+    alternative to a shallow clone) proves that reading wrong: neither
+    commit is an ancestor of the other here, so the correct answer is
+    "unknown", not "current"."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git("init", "-q", cwd=repo)
+    _git("config", "user.email", "test@example.com", cwd=repo)
+    _git("config", "user.name", "Test", cwd=repo)
+
+    (repo / "Core").mkdir()
+    (repo / "Core" / "a.md").write_text("base\n", encoding="utf-8")
+    (repo / "Core" / "b.md").write_text("base\n", encoding="utf-8")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "base", cwd=repo)
+
+    # Branch "feature": the only branch that touches Core/a.md again.
+    _git("checkout", "-q", "-b", "feature", cwd=repo)
+    (repo / "Core" / "a.md").write_text("feature change\n", encoding="utf-8")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "feature touches a.md", cwd=repo)
+    feature_commit = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    # Back on the original branch, an unrelated commit that never touches
+    # Core/a.md -- diverges from "feature" at the shared "base" commit;
+    # neither is an ancestor of the other.
+    _git("checkout", "-q", "-", cwd=repo)  # back to the branch before "feature"
+    (repo / "Core" / "b.md").write_text("trunk change\n", encoding="utf-8")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "trunk touches b.md", cwd=repo)
+    trunk_commit = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    # last_touch_commit must see feature_commit for Core/a.md, so HEAD has
+    # to be on "feature" when queried -- git objects are content-addressed
+    # and reachable by hash regardless of what is checked out, but `git
+    # log -1 -- <path>` without an explicit revision walks from HEAD.
+    _git("checkout", "-q", "feature", cwd=repo)
+    git_ops = SubprocessGitOps(wiki_root=repo)
+
+    assert git_ops.last_touch_commit("Core/a.md") == feature_commit
+    assert git_ops.is_ancestor(trunk_commit, feature_commit) is False
+    assert git_ops.is_ancestor(feature_commit, trunk_commit) is False
+
+    assert freshness_verdict(git_ops, trunk_commit, "Core/a.md") == "unknown"
+
+
+def test_freshness_unknown_when_both_ancestry_directions_report_true() -> None:
+    """Impossible in a real acyclic git history for two distinct commits,
+    but the function must still refuse to guess rather than trust it."""
+    git_ops = _FakeGitOps(
+        last_touch={"Core/x.md": "commit-b"},
+        ancestry={("commit-a", "commit-b"): True, ("commit-b", "commit-a"): True},
+    )
+    assert freshness_verdict(git_ops, "commit-a", "Core/x.md") == "unknown"
+
+
+def test_freshness_unknown_when_one_direction_is_none_even_if_other_is_false() -> None:
+    """A prior, single-direction check would have read `False` alone as
+    "current" -- must stay unknown when the other direction cannot be
+    determined at all."""
+    git_ops = _FakeGitOps(
+        last_touch={"Core/x.md": "commit-b"},
+        ancestry={("commit-a", "commit-b"): False},  # reverse direction absent -> None
+    )
+    assert freshness_verdict(git_ops, "commit-a", "Core/x.md") == "unknown"
+
+
 def test_subprocess_git_ops_on_a_non_git_directory_is_unknown_not_a_crash(
     tmp_path,
 ) -> None:
@@ -453,7 +541,10 @@ def test_structural_absence_and_freshness_absence_are_different_categories() -> 
 
     git_ops = _FakeGitOps(
         last_touch={project_path: "newcommit"},
-        ancestry={("export-commit", "newcommit"): True},
+        ancestry={
+            ("export-commit", "newcommit"): True,
+            ("newcommit", "export-commit"): False,
+        },
     )
 
     diffs, summary = diff_export_against_catalog(
@@ -582,11 +673,13 @@ def test_duplicate_zone_entries_are_extra_in_export_not_merged_into_missing() ->
     assert summary["missing_from_export"] == 0
     extra = [d for d in diffs if d["category"] == "extra_in_export"]
     assert extra[0]["path"] == dup_path
-    assert extra[0]["zones"] == ["knowledge_feed"]
-    # dup_path's facts default to zone-ineligible for knowledge_feed -> the
-    # duplicate zone must be reported as an anomaly, not a legitimate second
-    # representation.
-    assert extra[0]["reasons"] == ["zone_not_eligible"]
+    # dup_path is a procedure note: not a "project-*.md" filename, so
+    # neither "projects" (the primary/first-seen zone) nor "knowledge_feed"
+    # (the duplicate) is a zone this note is eligible for -- round 3 fix:
+    # *both* representations are checked, including the primary one, not
+    # just the ones beyond the first.
+    assert extra[0]["zones"] == ["projects", "knowledge_feed"]
+    assert extra[0]["reasons"] == ["zone_not_eligible", "zone_not_eligible"]
 
 
 def test_duplicate_zone_entry_in_a_legitimately_eligible_zone_is_labeled_as_such() -> (
@@ -623,7 +716,56 @@ def test_duplicate_zone_entry_in_a_legitimately_eligible_zone_is_labeled_as_such
         export_compare_module.PILOT_NOTE_PATHS = original
 
     extra = next(d for d in diffs if d["category"] == "extra_in_export")
-    assert extra["reasons"] == ["duplicate_in_eligible_zone"]
+    assert extra["zones"] == ["projects", "topics"]
+    assert extra["reasons"] == [
+        "duplicate_in_eligible_zone",
+        "duplicate_in_eligible_zone",
+    ]
+
+
+def test_extra_in_export_flags_an_ineligible_primary_zone_not_just_the_duplicates() -> (
+    None
+):
+    """Round 3, non-blocking finding #1: a prior version only validated
+    matches[1:], so an ineligible *primary* (first-seen) representation
+    went unflagged. Here the first-seen zone (knowledge_feed) is the
+    illegitimate one and the second (projects) is legitimate -- the fix
+    must flag the first, not just the second."""
+    dup_path = "Core/project-y.md"
+    catalog = CatalogSnapshot(
+        entries=(_catalog_entry(dup_path),)
+        + tuple(_catalog_entry(p) for p in PILOT_NOTE_PATHS[1:]),
+        index_revision="sha256:test",
+        bundle_commit=None,
+    )
+    facts = _facts_all()
+    facts[dup_path] = _facts(dup_path, status="active", library_id="lib-2")
+    pilot_paths_patched = (dup_path,) + PILOT_NOTE_PATHS[1:]
+    entries = (
+        ExportEntry(zone="knowledge_feed", path=dup_path, title="Title", status=None),
+    ) + tuple(
+        ExportEntry(zone="projects", path=path, title="Title", status="active")
+        for path in pilot_paths_patched
+    )
+
+    import benchmarks.export_compare as export_compare_module
+
+    original = export_compare_module.PILOT_NOTE_PATHS
+    export_compare_module.PILOT_NOTE_PATHS = pilot_paths_patched
+    try:
+        diffs, _ = diff_export_against_catalog(
+            entries,
+            catalog,
+            facts_by_path=facts,
+            export_commit="abc1234",
+            git_ops=NullGitOps(),
+        )
+    finally:
+        export_compare_module.PILOT_NOTE_PATHS = original
+
+    extra = next(d for d in diffs if d["category"] == "extra_in_export")
+    assert extra["zones"] == ["knowledge_feed", "projects"]
+    assert extra["reasons"] == ["zone_not_eligible", "duplicate_in_eligible_zone"]
 
 
 def test_title_mismatch_is_metadata_mismatch_with_field_name_only() -> None:
