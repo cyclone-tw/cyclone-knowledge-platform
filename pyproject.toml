@@ -26,6 +26,19 @@ dependencies = [
 index = [
   "qdrant-client>=1.14,<1.16",
 ]
+# The semantic embedding inference stack (issue #25) stays out of the base
+# dependencies and the runtime image on the same grounds as the ``index``
+# extra above: composed explicitly in tests, benchmarks, and container
+# smoke, never by the default app. No client-server split here -- these are
+# the CPU inference libraries themselves -- but the principle is identical:
+# a benchmark tool is not a runtime dependency. Pinned model weights are a
+# separate, digest-verified download handled by
+# ``scripts/fetch-semantic-model.sh``, not a package on this list.
+semantic = [
+  "onnxruntime>=1.18,<2",
+  "tokenizers>=0.20,<1",
+  "numpy>=1.26,<3",
+]
 dev = [
   "pytest>=8.0",
   "ruff>=0.6",

@@ -142,11 +142,23 @@ def test_default_app_composes_no_embedding_and_exposes_no_embedding_surface() ->
 
 
 def test_only_the_c5_index_package_depends_on_c4() -> None:
-    """C5 (#18) is the sanctioned consumer; nothing else imports embeddings."""
+    """C5 (#18) and the issue #25 semantic provider are the sanctioned
+    consumers; nothing else imports embeddings.
+
+    ``ckp.semantic`` was added by issue #25 to ship a real local semantic
+    embedding provider alongside the C4 hash baseline. It only *consumes*
+    the provider-neutral interfaces here -- ``EmbeddingProvider``,
+    ``ProviderDescriptor``, ``ProviderRegistry``, ``CosineReranker`` -- the
+    same relationship C5's ``ckp.index`` already has. Nothing in this
+    package (``PACKAGE`` above) changed to make that possible, and this
+    allowlist is the only place that had to move.
+    """
     for path in sorted((REPO_ROOT / "src/ckp").rglob("*.py")):
         if PACKAGE in path.parents:
             continue
         if (REPO_ROOT / "src/ckp/index") in path.parents:
+            continue
+        if (REPO_ROOT / "src/ckp/semantic") in path.parents:
             continue
         assert "ckp.embedding" not in path.read_text(encoding="utf-8"), path.name
 

@@ -43,18 +43,35 @@ jobs:
         with:
           python-version: "${{ matrix.python-version }}"
 
-      - name: Install package with dev and index extras
-        run: python3 -m pip install --disable-pip-version-check -e ".[dev,index]"
+      - name: Install package with dev, index, and semantic extras
+        run: python3 -m pip install --disable-pip-version-check -e ".[dev,index,semantic]"
 
       - name: Lint
         run: |
           python3 -m ruff check .
           python3 -m ruff format --check .
 
+      - name: Cache the pinned semantic model assets
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.cache/ckp-semantic-model
+          # The manifest's pinned commit is the whole cache key: bumping it
+          # in src/ckp/semantic/manifest.py (a model swap or revision bump)
+          # naturally invalidates this cache instead of silently reusing
+          # stale weights, without hashing the manifest file itself.
+          key: ckp-semantic-model-75c43b069aac4d136ba6bc1122f995fedcfd2781
+
+      - name: Fetch and verify the pinned semantic model (build-time only)
+        env:
+          CKP_SEMANTIC_MODEL_DIR: ${{ github.workspace }}/.cache/ckp-semantic-model
+        run: bash scripts/fetch-semantic-model.sh
+
       - name: Tests
         env:
           PYTHONDONTWRITEBYTECODE: "1"
           CKP_REQUIRE_QDRANT: "1"
+          CKP_REQUIRE_SEMANTIC: "1"
+          CKP_SEMANTIC_MODEL_DIR: ${{ github.workspace }}/.cache/ckp-semantic-model
         run: python3 -m pytest
 
       - name: C6 mutation matrix
@@ -86,6 +103,12 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: bash scripts/test-c5-mutations.sh
+
+      - name: Issue #25 semantic-provider mutation matrix
+        if: matrix.python-version == '3.14'
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: bash scripts/test-c25-semantic-mutations.sh
 
   container:
     # Contract Phase 8 wants a cold rebuild on a different host to be routine.
