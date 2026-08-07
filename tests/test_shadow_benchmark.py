@@ -140,23 +140,23 @@ def test_real_questions_target_only_the_frozen_pilot_note_paths() -> None:
     question set claim real-corpus coverage for a note nothing actually
     freezes or verifies.
 
-    Also pins ``benchmarks.questions._PILOT_NOTE_PATHS`` (a local mirror,
-    not an import -- issue #26 Round 2 Codex Finding 1: a top-level
-    ``from ckp.pilot import PILOT_NOTE_PATHS`` broke the container image,
-    which excludes ``ckp.pilot`` by design, since the C5 container smoke
-    test imports ``benchmarks`` at module load time) byte-identical to the
-    real ``ckp.pilot.PILOT_NOTE_PATHS``, so the two copies can never
-    silently drift apart. This test only runs where ``ckp.pilot`` is
-    installed -- never inside the runtime image, which is exactly where the
-    mirror needs to exist standalone.
+    Deliberately checked against ``benchmarks.questions._PILOT_NOTE_PATHS``
+    (the local mirror), never against ``ckp.pilot.PILOT_NOTE_PATHS``
+    directly -- issue #26 Round 3 (Codex): the C5 container smoke actually
+    *runs* this file's tests inside the image, which excludes ``ckp.pilot``
+    by design (#23), and a runtime (not just module-level) ``from ckp.pilot
+    import ...`` here made that smoke fail with ``ModuleNotFoundError`` even
+    though the module-level import in ``benchmarks.questions`` had already
+    been fixed in Round 2 -- the same class of bug, one hop further down
+    the same file (AGENTS.md §9 Q3). The drift check against the *real*
+    ``ckp.pilot.PILOT_NOTE_PATHS`` lives in
+    ``test_pilot_note_paths_mirror_matches_ckp_pilot`` below, which skips
+    (not fails) where ``ckp.pilot`` is not installed -- so this test keeps
+    running everywhere, including inside the container image.
     """
     from benchmarks.questions import _PILOT_NOTE_PATHS
 
-    from ckp.pilot import PILOT_NOTE_PATHS
-
-    assert _PILOT_NOTE_PATHS == PILOT_NOTE_PATHS
-
-    allowed = set(PILOT_NOTE_PATHS)
+    allowed = set(_PILOT_NOTE_PATHS)
     for question in REAL_QUESTIONS:
         assert question.provenance == "real"
         assert question.expected_paths, question.question_id
@@ -168,6 +168,25 @@ def test_real_questions_target_only_the_frozen_pilot_note_paths() -> None:
         path for question in REAL_QUESTIONS for path in question.expected_paths
     }
     assert exercised == allowed
+
+
+def test_pilot_note_paths_mirror_matches_ckp_pilot() -> None:
+    """Drift guard: ``benchmarks.questions._PILOT_NOTE_PATHS`` (the local
+    mirror, see its definition for why it is not an import) must stay
+    byte-identical to the real ``ckp.pilot.PILOT_NOTE_PATHS``.
+
+    Skips via ``pytest.importorskip`` rather than failing when ``ckp.pilot``
+    is not installed -- true inside the runtime/C5-smoke image by design
+    (#23), where there is nothing to drift-check against and the skip is
+    not hiding a real problem, unlike a D5-style "silent skip" over a
+    *reachable* live checkout. Everywhere ``ckp.pilot`` *is* installed (dev,
+    CI's ``lint-and-test`` job, any environment except the runtime image)
+    this still runs and still fails loudly on drift.
+    """
+    ckp_pilot = pytest.importorskip("ckp.pilot")
+    from benchmarks.questions import _PILOT_NOTE_PATHS
+
+    assert _PILOT_NOTE_PATHS == ckp_pilot.PILOT_NOTE_PATHS
 
 
 def test_known_coverage_gaps_are_recorded_and_synthetic_only() -> None:
