@@ -10,6 +10,7 @@ smoke check (issue #23 "Runtime smoke"), outside pytest.
 from __future__ import annotations
 
 import hashlib
+import json
 
 import pytest
 
@@ -123,12 +124,14 @@ def test_format_invalid_string_values_are_refused_without_echo(
     for index, path in enumerate(PILOT_NOTE_PATHS):
         rp = value if (index == 0 and field == "relative_path") else path
         sha = value if (index == 0 and field == "content_sha256") else "0" * 64
+        # json.dumps produces valid TOML basic-string escaping (\n etc.);
+        # repr or raw interpolation breaks on newline-bearing values, since a
+        # literal newline inside a TOML basic string is invalid TOML.
         lines.append(
             "[[note]]\nrelative_path = "
-            + repr(rp).replace("'", '"')
-            + '\ncontent_sha256 = "'
-            + sha
-            + '"'
+            + json.dumps(rp)
+            + "\ncontent_sha256 = "
+            + json.dumps(sha)
         )
     manifest_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
