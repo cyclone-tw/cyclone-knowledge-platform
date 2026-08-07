@@ -87,6 +87,22 @@ def _tags(metadata: dict[str, Any]) -> tuple[str, ...] | None:
     return tuple(value)
 
 
+def _heading_title(body: str) -> str | None:
+    """The note's first Markdown ``# `` heading text, or ``None``.
+
+    Same definition ``cyclone-wiki`` ``wiki_dashboard_export.first_heading_body``
+    and ``development_candidates.note_title`` both use: scan the
+    post-frontmatter body for the first line starting with ``"# "`` and take
+    the rest of that line, stripped. ``body`` here is already the
+    post-frontmatter text (see :func:`_document_parts`), so this does not
+    re-strip frontmatter the way the wiki-side helpers do.
+    """
+    for line in body.splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()
+    return None
+
+
 def project_member(
     member: BundleMember,
     *,
@@ -118,6 +134,8 @@ def project_member(
         module_id=_string(metadata, "module_id"),
         tags=_tags(metadata),
         citation=citation,
+        heading_title=_heading_title(body),
+        candidate_status=_string(metadata, "candidate_status"),
         body=body,
     )
 
