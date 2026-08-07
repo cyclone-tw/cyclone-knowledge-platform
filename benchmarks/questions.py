@@ -7,8 +7,9 @@ checkout with no fixture mutation.
 
 Issue #26 (P5, Epic #21 D2) adds a second, real half: ``REAL_QUESTIONS``
 targets six real Cyclone-Wiki notes frozen by D2 and read live through
-``ckp.pilot`` (issue #23) -- this module carries only their *paths* (via
-``ckp.pilot.PILOT_NOTE_PATHS``) and hand-written queries about what their
+``ckp.pilot`` (issue #23) -- this module carries only their *paths* (a local
+mirror of ``ckp.pilot.PILOT_NOTE_PATHS``, see ``_PILOT_NOTE_PATHS`` below)
+and hand-written queries about what their
 filenames say they are about, never their bodies. ``tests/test_no_wiki_content.py``
 enforces that no real note content ever lands in this repo; nothing here
 weakens that guard.
@@ -30,7 +31,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ckp.pilot import PILOT_NOTE_PATHS
+#: D2's six frozen real-note paths, mirrored from ``ckp.pilot.
+#: PILOT_NOTE_PATHS`` rather than imported from it (issue #26 Round 2,
+#: Codex Finding 1: the runtime image deliberately excludes ``ckp.pilot``
+#: -- issue #23 -- but the C5 container smoke test imports ``benchmarks``
+#: at module load time; a top-level ``from ckp.pilot import
+#: PILOT_NOTE_PATHS`` here made that image fail with
+#: ``ModuleNotFoundError: No module named 'ckp.pilot'``). ``ckp.pilot``
+#: itself must **not** go back into the runtime image to fix this -- that
+#: would undo #23's design. ``tests/test_shadow_benchmark.py::
+#: test_real_questions_target_only_the_frozen_pilot_note_paths`` asserts
+#: this mirror stays byte-identical to ``ckp.pilot.PILOT_NOTE_PATHS`` in
+#: every environment that *does* have ``ckp.pilot`` installed (every
+#: environment except the runtime image), so the two copies can never
+#: silently drift apart unnoticed.
+_PILOT_NOTE_PATHS: tuple[str, ...] = (
+    "Core/procedure-agent-wiki-note-retrieval.md",
+    "Core/procedure-agent-memory-read-scopes.md",
+    "Core/decision-cyclone-wiki-openwiki-role-boundary.md",
+    "Core/project-cyclone-okf-knowledge-contract.md",
+    "Core/_inbox/agent-captures/2026-07-04-relayapi-repo-analysis.md",
+    "Core/_inbox/agent-captures/2026-06-23-hermes-os-2-100-stars-loops.md",
+)
 
 CORPUS_VERSION = "3"
 QUESTION_SET_VERSION = "2"
@@ -282,62 +304,62 @@ COFFEE_LOG_QUESTION_IDS: tuple[str, ...] = ("q01-espresso", "q02-kettlebell")
 #: never reads those bodies -- see the module docstring and
 #: ``tests/test_no_wiki_content.py``).
 #:
-#: Mapping to ``PILOT_NOTE_PATHS`` (Core procedure ×2, Decision, Project,
+#: Mapping to ``_PILOT_NOTE_PATHS`` (Core procedure ×2, Decision, Project,
 #: external Source ×2 -- D2's six):
 #:
-#: * ``PILOT_NOTE_PATHS[0]`` (procedure) -> precise-note
-#: * ``PILOT_NOTE_PATHS[0]`` + ``PILOT_NOTE_PATHS[1]`` (both procedures)
+#: * ``_PILOT_NOTE_PATHS[0]`` (procedure) -> precise-note
+#: * ``_PILOT_NOTE_PATHS[0]`` + ``_PILOT_NOTE_PATHS[1]`` (both procedures)
 #:   -> cross-note (D2's own rationale for freezing a second procedure note
 #:   was explicitly "測跨頁整合")
-#: * ``PILOT_NOTE_PATHS[2]`` (decision) -> latest-status (the currently
+#: * ``_PILOT_NOTE_PATHS[2]`` (decision) -> latest-status (the currently
 #:   authoritative decision, not a superseded/current pair like the
 #:   synthetic ``q04`` -- real corpus has no superseded pair, see
 #:   ``KNOWN_COVERAGE_GAPS`` note on stale-exclusion below)
-#: * ``PILOT_NOTE_PATHS[3]`` (project) -> precise-note (a second example,
+#: * ``_PILOT_NOTE_PATHS[3]`` (project) -> precise-note (a second example,
 #:   over a different note type)
-#: * ``PILOT_NOTE_PATHS[4]``, ``PILOT_NOTE_PATHS[5]`` (external captures)
+#: * ``_PILOT_NOTE_PATHS[4]``, ``_PILOT_NOTE_PATHS[5]`` (external captures)
 #:   -> external-source
 REAL_QUESTIONS: tuple[BenchmarkQuestion, ...] = (
     BenchmarkQuestion(
         "r01-wiki-note-retrieval",
         "precise-note",
         "agent 讀取 wiki note 的標準程序 retrieval procedure",
-        (PILOT_NOTE_PATHS[0],),
+        (_PILOT_NOTE_PATHS[0],),
         "real",
     ),
     BenchmarkQuestion(
         "r02-retrieval-and-memory-scopes",
         "cross-note",
         "agent wiki note retrieval 與 memory read scopes 兩份程序的關聯",
-        (PILOT_NOTE_PATHS[0], PILOT_NOTE_PATHS[1]),
+        (_PILOT_NOTE_PATHS[0], _PILOT_NOTE_PATHS[1]),
         "real",
     ),
     BenchmarkQuestion(
         "r03-openwiki-role-boundary",
         "latest-status",
         "Cyclone-Wiki 與 OpenWiki 目前的角色邊界決策",
-        (PILOT_NOTE_PATHS[2],),
+        (_PILOT_NOTE_PATHS[2],),
         "real",
     ),
     BenchmarkQuestion(
         "r04-okf-knowledge-contract",
         "precise-note",
         "Cyclone OKF knowledge contract 專案範圍",
-        (PILOT_NOTE_PATHS[3],),
+        (_PILOT_NOTE_PATHS[3],),
         "real",
     ),
     BenchmarkQuestion(
         "r05-relayapi-analysis",
         "external-source",
         "RelayAPI repo 分析摘要",
-        (PILOT_NOTE_PATHS[4],),
+        (_PILOT_NOTE_PATHS[4],),
         "real",
     ),
     BenchmarkQuestion(
         "r06-hermes-os-loops",
         "external-source",
         "Hermes OS 2 100 stars loops 摘要",
-        (PILOT_NOTE_PATHS[5],),
+        (_PILOT_NOTE_PATHS[5],),
         "real",
     ),
 )

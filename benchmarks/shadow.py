@@ -215,6 +215,7 @@ def run_shadow_benchmark(
     gate: PrivacyGate,
     top_k: int,
     questions: tuple[BenchmarkQuestion, ...],
+    index_admissible: frozenset[PrivacyClass] = _PUBLIC_ONLY,
     trials: int = DEFAULT_LATENCY_TRIALS,
 ) -> dict:
     """Rebuild, query both engines, and assemble the deterministic report.
@@ -226,6 +227,35 @@ def run_shadow_benchmark(
     (synthetic-only); passing ``benchmarks.questions.PILOT_QUESTIONS`` (or
     any other mix) scores real and synthetic questions together, split in
     the report by each question's own ``provenance``.
+
+    ``index_admissible`` (issue #26 Round 2 coordinator review) is forwarded
+    verbatim to ``plan_rebuild``'s own ``admissible`` parameter -- it widens
+    which privacy classes actually get embedded into the index. Defaults to
+    public-only, matching every caller before this parameter existed.
+    Passing it wider (e.g. ``frozenset({PrivacyClass.PUBLIC,
+    PrivacyClass.INTERNAL})``) is the fix for the bug Codex's Round 1 review
+    found: a mixed real+synthetic ``questions`` set produced an honest-
+    looking-but-empty real-provenance score, because the six real (``
+    internal``) D2 notes never made it into the index at all -- the plan
+    admitted public only, no matter what ``gate`` itself was configured to
+    admit -- so every real question's retrieval was a guaranteed miss before
+    a single query ran.
+
+    Deliberately **not** parametrized: the ``filter_privacy`` argument this
+    module passes to each ``index_provider.search()`` call, which stays
+    hardcoded to ``_PUBLIC_ONLY`` regardless of ``index_admissible``. Every
+    concrete ``VectorIndexProvider`` this repo ships validates that argument
+    via ``ckp.index.models.require_public_filter`` (exact equality to
+    ``{PrivacyClass.PUBLIC}``, unrelated to and unaware of
+    ``index_admissible``) but **never actually uses it to filter which
+    points a search can return** -- every provider scores every point in the
+    rebuilt plan with no per-point privacy check, because ``IndexedPoint``
+    itself carries no privacy field. So passing anything other than
+    ``_PUBLIC_ONLY`` there would only ever raise ``IndexRefusal`` without
+    changing what comes back; the real fix is entirely on the index-build
+    side (``index_admissible`` above), and leaving ``filter_privacy`` as
+    ``_PUBLIC_ONLY`` here is intentional, not an oversight left over from
+    Round 1.
 
     ``trials`` controls how many times each question is re-run against each
     engine purely for the latency sample (default
@@ -255,7 +285,9 @@ def run_shadow_benchmark(
         raise ValueError("trials must be >= 1")
 
     descriptor = require_index_provider(index_provider)
-    plan = plan_rebuild(members=members, stack=stack, gate=gate)
+    plan = plan_rebuild(
+        members=members, stack=stack, gate=gate, admissible=index_admissible
+    )
     rebuild_report = index_provider.rebuild(plan)
 
     snapshot = BundleSnapshot(
@@ -268,9 +300,16 @@ def run_shadow_benchmark(
     )
     catalog = CatalogBuilder(gate).build(snapshot)
 
-    #: The only paths any engine may surface: what the gated plan indexed.
-    #: Judging leaks against this set (not a fixture list) also catches a
-    #: rogue provider inventing paths nobody has ever seen (R1 review).
+    #: The only paths any engine may surface: what the gated plan actually
+    #: indexed under this run's ``index_admissible``. Named ``public_paths``
+    #: since #22, kept for #26 (a name change here is not pinned by any
+    #: mutation but would be needless diff noise) even though it is no
+    #: longer only-ever-public: with a widened ``index_admissible`` this is
+    #: the real "approved set" -- the pilot's admitted real notes union
+    #: whatever synthetic public notes also made it in -- computed from what
+    #: this run's plan actually contains, never from a static allowlist, so
+    #: a rogue provider inventing a path nobody has ever seen is still
+    #: caught (R1 review) even in a mixed run.
     public_paths = frozenset(point.relative_path for point in plan.points)
 
     #: Privacy false positives: notes declared ``public`` in the corpus that

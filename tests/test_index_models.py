@@ -208,6 +208,97 @@ def test_plan_rebuild_orders_gates_and_counts() -> None:
     assert scrambled.composed_revision == plan.composed_revision
 
 
+def test_plan_rebuild_admissible_defaults_to_public_only() -> None:
+    """Issue #26 Round 2 (Codex Finding 2): pin the default explicitly.
+
+    Before this parameter existed, ``plan_rebuild`` hardcoded ``verdict.
+    privacy is PrivacyClass.PUBLIC``; every caller predating issue #26 (the
+    Gateway; every other test in this file) must see zero behavior change.
+    A mutant that hardcodes the check back to literal ``PUBLIC`` regardless
+    of what ``admissible`` says would still pass *this* assertion (the
+    default *is* public-only) -- ``test_plan_rebuild_admissible_widens_
+    which_privacy_classes_are_embedded`` below is the one that catches that,
+    by proving the parameter is actually wired, not just present.
+    """
+    import inspect
+
+    signature = inspect.signature(plan_rebuild)
+    assert signature.parameters["admissible"].default == frozenset(
+        {PrivacyClass.PUBLIC}
+    )
+
+
+def test_plan_rebuild_admissible_widens_which_privacy_classes_are_embedded() -> None:
+    """The parameter must be *wired*, not just accepted (Codex Finding 2).
+
+    ``corpus_members()`` carries one ``internal`` fixture note
+    (``budget-internal.md``, 1 of the 3 non-public members the default-gate
+    test above excludes). A gate configured to admit
+    ``{PUBLIC, INTERNAL}`` alone is not enough to embed it -- issue #26
+    Round 1's bug was exactly this: ``plan_rebuild`` ignored what the gate
+    admitted and hardcoded ``PUBLIC`` regardless. Passing
+    ``admissible={PUBLIC, INTERNAL}`` here must be what actually changes the
+    indexed count; a mutant that accepts the parameter but never reads it
+    would still index 8 either way and fail the ``== 9`` assertion below.
+    """
+    from ckp.privacy import FrontmatterClassifier
+    from ckp.privacy.gate import PrivacyGate
+    from index_fixtures import UNUSED_ROOT
+
+    members = corpus_members()
+    stack = deterministic_stack()
+    mixed_gate = PrivacyGate(
+        FrontmatterClassifier(UNUSED_ROOT),
+        frozenset({PrivacyClass.PUBLIC, PrivacyClass.INTERNAL}),
+    )
+
+    public_only_plan = plan_rebuild(
+        members=members,
+        stack=stack,
+        gate=mixed_gate,
+        admissible=frozenset({PrivacyClass.PUBLIC}),
+    )
+    assert public_only_plan.indexed_count == 8
+
+    widened_plan = plan_rebuild(
+        members=members,
+        stack=stack,
+        gate=mixed_gate,
+        admissible=frozenset({PrivacyClass.PUBLIC, PrivacyClass.INTERNAL}),
+    )
+    # 8 public + budget-internal.md: the one `internal` fixture member that
+    # a matching gate now admits *and* this run's `admissible` allows.
+    assert widened_plan.indexed_count == 9
+    paths = {point.relative_path for point in widened_plan.points}
+    assert "budget-internal.md" in paths
+
+    # Still fails closed: `sensitive`/`student-private` remain excluded even
+    # though the *gate* here would admit any class the caller configured it
+    # for -- this gate simply was never configured to admit them, matching
+    # every other gate in this codebase (Decision §2).
+    assert "meeting-sensitive.md" not in paths
+    assert "learner-record.md" not in paths
+
+
+def test_plan_rebuild_admissible_never_admits_student_private() -> None:
+    """A second, independent refusal (Decision §2), mirroring
+    ``PrivacyGate``'s own unconditional ``student-private`` rule -- a caller
+    mistake in ``admissible`` alone must still fail closed even if ``gate``
+    itself were somehow misconfigured to admit it.
+    """
+    members = corpus_members()
+    stack = deterministic_stack()
+    gate = public_gate()
+    with pytest.raises(IndexRefusal) as caught:
+        plan_rebuild(
+            members=members,
+            stack=stack,
+            gate=gate,
+            admissible=frozenset({PrivacyClass.PUBLIC, PrivacyClass.STUDENT_PRIVATE}),
+        )
+    assert caught.value.code is IndexErrorCode.PLAN_INVALID
+
+
 def test_plan_rebuild_fails_closed_on_empty_and_excludes_bad_members() -> None:
     stack = deterministic_stack()
     gate = public_gate()

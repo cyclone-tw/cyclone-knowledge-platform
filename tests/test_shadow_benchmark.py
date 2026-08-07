@@ -33,7 +33,7 @@ from ckp.index import (
     SearchResult,
 )
 from ckp.index.revision import INDEX_SCHEMA_VERSION
-from ckp.privacy import FrontmatterClassifier
+from ckp.privacy import FrontmatterClassifier, PrivacyClass
 from ckp.privacy.gate import PrivacyGate
 from index_fixtures import (
     UNUSED_ROOT,
@@ -139,8 +139,22 @@ def test_real_questions_target_only_the_frozen_pilot_note_paths() -> None:
     (or no longer) part of the frozen allowlist -- which would make the
     question set claim real-corpus coverage for a note nothing actually
     freezes or verifies.
+
+    Also pins ``benchmarks.questions._PILOT_NOTE_PATHS`` (a local mirror,
+    not an import -- issue #26 Round 2 Codex Finding 1: a top-level
+    ``from ckp.pilot import PILOT_NOTE_PATHS`` broke the container image,
+    which excludes ``ckp.pilot`` by design, since the C5 container smoke
+    test imports ``benchmarks`` at module load time) byte-identical to the
+    real ``ckp.pilot.PILOT_NOTE_PATHS``, so the two copies can never
+    silently drift apart. This test only runs where ``ckp.pilot`` is
+    installed -- never inside the runtime image, which is exactly where the
+    mirror needs to exist standalone.
     """
+    from benchmarks.questions import _PILOT_NOTE_PATHS
+
     from ckp.pilot import PILOT_NOTE_PATHS
+
+    assert _PILOT_NOTE_PATHS == PILOT_NOTE_PATHS
 
     allowed = set(PILOT_NOTE_PATHS)
     for question in REAL_QUESTIONS:
@@ -228,6 +242,49 @@ def test_summary_splits_real_and_synthetic_hit_rates_separately() -> None:
         provenance["synthetic"]["citation_correct_questions"]
         + provenance["real"]["citation_correct_questions"]
     )
+
+
+def test_provenance_split_reflects_a_genuine_real_miss_against_synthetic_hits() -> None:
+    """Issue #26 Round 2, Codex Finding 3: an asymmetric fixture, not just
+    field presence.
+
+    Codex injected "``_hit`` always returns ``True``" and
+    ``test_summary_splits_real_and_synthetic_hit_rates_separately`` stayed
+    green, because that test's fixture makes *both* provenances hit --
+    there was no case where the two provenances' actual scores differ, so a
+    mutant that always returns the same answer regardless of input was
+    invisible to it. This uses an *unmodified* ``REAL_QUESTIONS`` entry
+    mixed into the synthetic-only fixture corpus (``corpus_members()``,
+    unchanged from every other test in this file): its expected path is a
+    real D2 path that cannot possibly appear in a synthetic-only corpus's
+    gated plan, so it is a genuine, guaranteed miss -- not a contrived
+    always-false stub -- while the synthetic questions in the same run
+    genuinely hit. A ``_hit`` that always returns ``True`` turns the real
+    block's rate from ``0.0`` into ``1.0``; one that always returns
+    ``False`` turns the synthetic block's rate from ``1.0`` into ``0.0``.
+    Either mutation must fail at least one assertion here.
+    """
+    real_question = REAL_QUESTIONS[0]
+    mixed = QUESTIONS + (real_question,)
+    report = _run(questions=mixed)
+    provenance = report["summary"]["provenance"]
+
+    assert provenance["real"]["scored_questions"] == 1
+    assert provenance["real"]["lexical_hit_rate"] == 0.0
+    assert provenance["real"]["vector_hit_rate"] == 0.0
+    assert provenance["synthetic"]["lexical_hit_rate"] == 1.0
+    assert provenance["synthetic"]["vector_hit_rate"] == 1.0
+
+    by_id = {q["question_id"]: q for q in report["questions"]}
+    real_entry = by_id[real_question.question_id]
+    assert real_entry["lexical"]["hit"] is False
+    assert real_entry["vector"]["hit"] is False
+    for question in QUESTIONS:
+        if not question.expected_paths:
+            continue
+        entry = by_id[question.question_id]
+        assert entry["lexical"]["hit"] is True, question.question_id
+        assert entry["vector"]["hit"] is True, question.question_id
 
 
 def test_provenance_with_no_questions_reports_none_not_zero() -> None:
@@ -467,6 +524,48 @@ class _LeakyIndex(InMemoryVectorIndex):
         return SearchResult(composed_revision=honest.composed_revision, hits=leaked)
 
 
+class _PilotPathSpoofingIndex(InMemoryVectorIndex):
+    """A rogue provider that surfaces a *real D2 pilot path* on every search,
+    without that path ever actually being part of this run's indexed plan.
+
+    Issue #26 Round 2 (Codex Finding 2 fix, coordinator-mandated mutation
+    guard): the leak basis must be "was this path actually in the plan this
+    run built", never "is this one of the six paths D2 named" -- a pilot
+    path is not pre-approved by identity. This run uses the *default*
+    ``index_admissible`` (public-only, see ``_run``'s default), so the real
+    path here was never indexed -- surfacing it must count as a leak, the
+    same as any other unindexed path, not be silently treated as safe just
+    because a human would recognize it as "one of the pilot six".
+    """
+
+    def search(self, query_vector, *, top_k, filter_privacy) -> SearchResult:
+        honest = super().search(
+            query_vector, top_k=top_k, filter_privacy=filter_privacy
+        )
+        spoofed = (
+            SearchHit(
+                relative_path=REAL_QUESTIONS[0].expected_paths[0], score=3.0, rank=0
+            ),
+            *(
+                SearchHit(
+                    relative_path=hit.relative_path,
+                    score=hit.score,
+                    rank=hit.rank + 1,
+                )
+                for hit in honest.hits[: top_k - 1]
+            ),
+        )
+        return SearchResult(composed_revision=honest.composed_revision, hits=spoofed)
+
+
+def test_a_known_pilot_path_not_actually_indexed_this_run_is_still_a_leak() -> None:
+    report = _run(index_provider=_PilotPathSpoofingIndex())
+    spoofed_path = REAL_QUESTIONS[0].expected_paths[0]
+    assert report["summary"]["privacy_false_negatives"] > 0
+    rendered = json.dumps(report, sort_keys=True, ensure_ascii=False)
+    assert spoofed_path not in rendered
+
+
 def test_privacy_violations_are_counted_and_redacted() -> None:
     report = _run(index_provider=_LeakyIndex())
     # Two leaked paths per question: one non-public fixture, one invented.
@@ -648,14 +747,19 @@ def test_all_required_composition_no_defaults() -> None:
 
     signature = inspect.signature(run_shadow_benchmark)
     parameters = signature.parameters
-    # ``trials`` is the sole intentional exception (contract §5.3
-    # latency-dimension addition): every composition input the harness
-    # depends on to build a correct report still has no default, but the
-    # repeat count for the latency sample is allowed a documented default
-    # so existing callers keep working unchanged. ``questions`` joined the
-    # required set in #26: which questions to score is a composition input
-    # exactly like ``members``/``stack``/``gate``, not a hardcoded import.
-    assert set(parameters) - {"trials"} == {
+    # ``trials`` and ``index_admissible`` are the two intentional exceptions:
+    # every *other* composition input the harness depends on to build a
+    # correct report still has no default. ``trials`` (contract §5.3
+    # latency-dimension addition) is a documented default so existing
+    # callers keep working unchanged. ``index_admissible`` (issue #26 Round
+    # 2) defaults to public-only for the same reason -- widening it is only
+    # ever a deliberate pilot-benchmark choice, never an accident of a
+    # caller that forgot to pass it, and production/pre-#26 callers must see
+    # zero behavior change from this parameter existing at all.
+    # ``questions`` joined the required-no-default set in #26: which
+    # questions to score is a composition input exactly like
+    # ``members``/``stack``/``gate``, not a hardcoded import.
+    assert set(parameters) - {"trials", "index_admissible"} == {
         "members",
         "stack",
         "index_provider",
@@ -667,6 +771,8 @@ def test_all_required_composition_no_defaults() -> None:
         assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
         if name == "trials":
             assert parameter.default == 5
+        elif name == "index_admissible":
+            assert parameter.default == frozenset({PrivacyClass.PUBLIC})
         else:
             assert parameter.default is inspect.Parameter.empty
 
