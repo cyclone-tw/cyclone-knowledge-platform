@@ -609,6 +609,24 @@ def test_token_totals_equal_on_the_subset_pass() -> None:
     assert _item(result, "context_token_total")["status"] == "pass"
 
 
+def test_no_qmd_baseline_reports_absent_costs_as_none_not_zero() -> None:
+    """Codex round 1 on #65: with ``qmd_compared`` False there is no QMD
+    baseline anywhere, and ``_real_qmd_stats``'s zero-initialized totals
+    must not surface as "the baseline cost 0" -- absent evidence is
+    reported as absent (None), never folded into a number."""
+    report = base_report(qmd_compared=False)
+    result = gate.evaluate_gate(report)
+    item = _item(result, "context_token_total")
+
+    assert item["status"] == "not_evaluable"
+    detail = item["detail"]
+    assert detail["pooled_qmd_token_cost_total_informational"] is None
+    assert detail["pooled_qmd_token_cost_unmeasured_questions_informational"] is None
+    assert detail["compared_question_ids"] == []
+    assert detail["platform_lexical_token_cost_total_on_subset"] is None
+    assert detail["qmd_token_cost_total_on_subset"] is None
+
+
 def test_empty_same_work_subset_never_passes() -> None:
     """Defense in depth below evaluate_gate: the #58 degenerate-baseline
     rule intercepts a zero-hit QMD before this dimension runs, so the
@@ -620,6 +638,11 @@ def test_empty_same_work_subset_never_passes() -> None:
 
     assert item["status"] == "not_evaluable"
     assert "same-work subset is empty" in item["reason"]
+    # An empty subset's totals are "nothing to total", never 0 -- while the
+    # pooled numbers stay numeric here, because QMD did run and pay.
+    assert item["detail"]["platform_lexical_token_cost_total_on_subset"] is None
+    assert item["detail"]["qmd_token_cost_total_on_subset"] is None
+    assert item["detail"]["pooled_qmd_token_cost_total_informational"] is not None
 
 
 # --- RP3: semantic=false vector must never decide a gate outcome -----------

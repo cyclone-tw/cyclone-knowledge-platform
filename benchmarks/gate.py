@@ -357,8 +357,18 @@ def _gate_context_token_total(report: dict, qmd_stats: dict) -> dict[str, Any]:
     real = report["summary"]["provenance"]["real"]
     pooled_lexical_total = real["lexical_token_cost_total"]
     pooled_lexical_unmeasured = real["lexical_token_cost_unmeasured_questions"]
-    pooled_qmd_total = qmd_stats["token_cost_total"]
-    pooled_qmd_unmeasured = qmd_stats["token_cost_unmeasured_questions"]
+    # Codex round 1: ``_real_qmd_stats`` counts from zero, so with no qmd
+    # block anywhere (``qmd_compared`` False) its totals read 0 -- and a
+    # detail that says "the absent baseline cost 0" has folded unknown
+    # into a number (AGENTS.md: absent evidence is reported as absent).
+    # ``saw_any_qmd_block`` is the exact signal for "these totals
+    # summarize something that actually ran".
+    if qmd_stats["saw_any_qmd_block"]:
+        pooled_qmd_total = qmd_stats["token_cost_total"]
+        pooled_qmd_unmeasured = qmd_stats["token_cost_unmeasured_questions"]
+    else:
+        pooled_qmd_total = None
+        pooled_qmd_unmeasured = None
 
     subset = [
         question
@@ -371,6 +381,13 @@ def _gate_context_token_total(report: dict, qmd_stats: dict) -> dict[str, Any]:
     qmd_unmeasured = sum(1 for cost in qmd_costs if cost is None)
     lexical_total = sum(cost for cost in lexical_costs if cost is not None)
     qmd_total = sum(cost for cost in qmd_costs if cost is not None)
+    if not subset:
+        # Same rule one level down: a total over an empty same-work subset
+        # is not "0 tokens", it is "nothing to total".
+        lexical_total = None
+        qmd_total = None
+        lexical_unmeasured = None
+        qmd_unmeasured = None
 
     detail = {
         "compared_on": (
