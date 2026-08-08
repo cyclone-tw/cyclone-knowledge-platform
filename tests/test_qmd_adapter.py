@@ -216,12 +216,50 @@ def test_run_qmd_query_deduplicates_repeated_normalized_paths(
 # --- qmd's underscore-stripped path spelling (issue #58) ----------------
 
 
-def test_qmd_visible_path_strips_one_leading_underscore_per_segment() -> None:
+def test_qmd_visible_path_strips_directory_underscores_only() -> None:
+    """Directory stripping is observed qmd behavior; filename stripping is
+    not observable (no ``_``-prefixed file exists in the wiki) and must NOT
+    be assumed -- an alias wider than observed behavior can credit a
+    different file's hit to the corpus (#61 review round 1).
+    """
     assert (
         _qmd_visible_path("Core/_inbox/agent-captures/x.md")
         == "Core/inbox/agent-captures/x.md"
     )
     assert _qmd_visible_path("Core/a.md") == "Core/a.md"
+    assert _qmd_visible_path("Core/_inbox/_note.md") == "Core/inbox/_note.md"
+    assert _qmd_visible_path("_note.md") == "_note.md"
+
+
+def test_run_qmd_query_never_credits_a_stripped_filename_spelling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-1 blocking finding, regression-pinned through the real entry
+    point: with corpus ``Core/_inbox/_note.md``, a hit spelled
+    ``Core/inbox/note.md`` is qmd's directory-only rendering of the
+    *different* file ``Core/_inbox/note.md`` and must stay filtered out;
+    only the directory-stripped spelling ``Core/inbox/_note.md`` is the
+    corpus note.
+    """
+    corpus_path = "Core/_inbox/_note.md"
+    payload = [
+        {
+            "score": 0.9,
+            "file": "qmd://cyclone-wiki/Core/inbox/note.md?index=cyclone-wiki",
+        },
+        {
+            "score": 0.7,
+            "file": "qmd://cyclone-wiki/Core/inbox/_note.md?index=cyclone-wiki",
+        },
+    ]
+    monkeypatch.setattr("shutil.which", lambda binary: "/usr/local/bin/qmd")
+    monkeypatch.setattr(
+        "subprocess.run", lambda *a, **k: _fake_completed(json.dumps(payload))
+    )
+    config = _config(tmp_path, corpus_paths=frozenset({corpus_path}))
+    result = run_qmd_query("q", config=config, top_k=5)
+    assert result.paths == (corpus_path,)
+    assert result.hits[0].score == 0.7
 
 
 def test_run_qmd_query_scores_hits_qmd_returns_in_stripped_spelling(

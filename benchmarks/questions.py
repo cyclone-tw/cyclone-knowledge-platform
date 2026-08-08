@@ -44,8 +44,13 @@ harness, and eventually the P9 report/gate) must keep real and synthetic
 statistics separate rather than average them into one number.
 
 Changing the corpus or either question tuple changes what the benchmark
-measures, so ``CORPUS_VERSION`` and ``QUESTION_SET_VERSION`` are bumped
-together whenever either changes.
+measures. Each change bumps its own version -- ``CORPUS_VERSION`` for
+``CORPUS``, ``QUESTION_SET_VERSION`` for ``QUESTIONS``/``REAL_QUESTIONS``
+-- and ``tests/test_benchmark_versions.py`` pins each version to a
+fingerprint of exactly the content it names, independently (its
+``test_corpus_and_question_set_versions_are_independent`` makes not
+bumping the untouched side a checked guarantee, not an accident: #58
+bumped only the question side).
 """
 
 from __future__ import annotations

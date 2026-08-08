@@ -1,21 +1,23 @@
 """Pin ``CORPUS_VERSION`` and ``QUESTION_SET_VERSION`` to the content they
 describe (issue #32).
 
-``benchmarks/questions.py`` promises in its module docstring that
-``CORPUS_VERSION`` and ``QUESTION_SET_VERSION`` are bumped together
-whenever the content they describe changes. Nothing enforced that promise:
-edit a note body or a question's expected paths, forget to bump the
-version, and no test noticed. The version numbers land in every shadow
-report (``corpus_version`` / ``question_set_version``) and #30 uses them
-as the audit trail for which corpus/question content a report was run
-against -- a version number that can silently lie is worse than no version
-number.
+``benchmarks/questions.py`` promises in its module docstring that each
+version names exactly the content it describes -- ``CORPUS_VERSION`` for
+``CORPUS``, ``QUESTION_SET_VERSION`` for the question tuples. At #32 time
+nothing enforced that promise: edit a note body or a question's expected
+paths, forget to bump the version, and no test noticed. The version
+numbers land in every shadow report (``corpus_version`` /
+``question_set_version``) and #30 uses them as the audit trail for which
+corpus/question content a report was run against -- a version number that
+can silently lie is worse than no version number.
 
 This module computes a deterministic content fingerprint for ``CORPUS``
-and for the full question set (``QUESTIONS`` + ``REAL_QUESTIONS``, i.e.
-``PILOT_QUESTIONS`` -- the module docstring says the corpus *or either*
-question tuple changing means both versions describe stale content) and
-pins each fingerprint to the version it was frozen at. If content changes
+and, separately, for the full question set (``QUESTIONS`` +
+``REAL_QUESTIONS``, i.e. ``PILOT_QUESTIONS``) and pins each fingerprint
+to the version it was frozen at -- independently, so a change on one side
+never demands a bump on the other (#58 bumped only the question side;
+``test_corpus_and_question_set_versions_are_independent`` below keeps the
+two claims disjoint). If content changes
 without a version bump, the freshly computed fingerprint stops matching
 the frozen one and the test goes red with a message that says which
 version to bump -- not just "update the expected fingerprint", which would

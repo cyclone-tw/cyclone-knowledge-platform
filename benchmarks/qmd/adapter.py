@@ -205,13 +205,25 @@ def _qmd_visible_path(path: str) -> str:
 
     Observed against the real named ``cyclone-wiki`` index (issue #58,
     2026-08-08, qmd 2.5.3): qmd strips one leading underscore from each
-    directory name, so ``Core/_inbox/agent-captures/foo.md`` is listed,
+    *directory* name, so ``Core/_inbox/agent-captures/foo.md`` is listed,
     fetched, and returned in search hits as
     ``Core/inbox/agent-captures/foo.md`` -- ``qmd ls`` finds nothing under
     the underscored spelling, and ``qmd get`` canonicalizes either spelling
     to the stripped one. ``--full-path`` cannot undo it: resolving the
     stripped path against the checkout fails (no such file), so those hits
     stay in ``qmd://`` URI form with the stripped spelling inside.
+
+    The *filename* segment is deliberately left untouched. Whether qmd
+    also strips a file-level leading underscore is unobservable today (the
+    wiki has no ``_``-prefixed ``.md`` file to probe), and transforming it
+    anyway would widen the accepted alias space beyond observed behavior:
+    a corpus entry ``Core/_inbox/_note.md`` would then also claim hits
+    spelled ``Core/inbox/note.md``, which under the observed
+    directory-only rule is how qmd renders the *different* file
+    ``Core/_inbox/note.md`` -- a false credit (#61 review round 1). If a
+    ``_``-prefixed filename ever enters the corpus and qmd does strip it,
+    that surfaces as a conspicuous miss to investigate, never as a
+    silently wrong baseline.
 
     Without this mapping, every hit on a note under ``Core/_inbox/`` fails
     the ``corpus_paths`` membership test and gets scored as a QMD miss --
@@ -221,9 +233,15 @@ def _qmd_visible_path(path: str) -> str:
     favor, the exact shape D3's scope-overlap precondition exists to keep
     out of the comparison.
     """
+    segments = path.split("/")
     return "/".join(
-        segment[1:] if segment.startswith("_") else segment
-        for segment in path.split("/")
+        [
+            *(
+                segment[1:] if segment.startswith("_") else segment
+                for segment in segments[:-1]
+            ),
+            segments[-1],
+        ]
     )
 
 
