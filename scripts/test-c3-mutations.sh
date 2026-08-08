@@ -198,8 +198,10 @@ replace_once \
 '
 replace_once \
   "src/ckp/gateway/service.py" \
-  '        total = len(filtered)' \
-  '        total = self._ungated_count'
+  '        return catalog_response(catalog, request)' \
+'        response = catalog_response(catalog, request)
+        response.total = self._ungated_count
+        return response'
 expect_red \
   "Catalog count aggregates before privacy filtering" \
   tests/test_gateway.py::test_catalog_filters_privacy_before_count_facets_and_pagination
@@ -436,11 +438,13 @@ echo "==> production staleness flag mutations (#39)"
 new_case
 replace_once \
   "src/ckp/app.py" \
-'        stale = (
-            served_before is not None
-            and served_before.index_revision != current.index_revision
-        )' \
-'        stale = False'
+'        if served_before is None:
+            stale: bool | None = False
+        elif served_before.index_revision is None or current.index_revision is None:
+            stale = None
+        else:
+            stale = served_before.index_revision != current.index_revision' \
+'        stale: bool | None = False'
 expect_red \
   "production stale flag removed -- resilience benchmark must not fall back to a self-comparator" \
   tests/test_app.py::test_revision_flags_stale_after_the_bundle_changes_underneath_it \

@@ -78,6 +78,12 @@ jobs:
           CKP_SEMANTIC_MODEL_DIR: ${{ github.workspace }}/.cache/ckp-semantic-model
         run: python3 -m pytest
 
+      - name: C3 gateway mutation matrix
+        if: matrix.python-version == '3.14'
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: bash scripts/test-c3-mutations.sh
+
       - name: C6 mutation matrix
         if: matrix.python-version == '3.14'
         env:
