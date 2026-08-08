@@ -44,6 +44,8 @@ ENV_PREFIX = "CKP_"
 RESERVED_ENV = frozenset(
     {
         "CKP_CONFIG_FILE",
+        "CKP_QMD_BINARY",
+        "CKP_REQUIRE_GATE_E2E",
         "CKP_REQUIRE_QDRANT",
         "CKP_REQUIRE_SEMANTIC",
         "CKP_SEMANTIC_MODEL_DIR",
