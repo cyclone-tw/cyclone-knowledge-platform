@@ -284,3 +284,34 @@ def test_api_version_is_bound_to_the_constant_not_copied(monkeypatch) -> None:
     assert client.app.version == sentinel
     assert client.get("/openapi.json").json()["info"]["version"] == sentinel
     assert client.get("/revision").json()["api_version"] == sentinel
+
+
+def test_revision_reports_unknown_not_fresh_when_a_revision_is_undeterminable(
+    tmp_path, monkeypatch
+):
+    """Codex round 1 on #39: `None != None` read as fresh. A served snapshot
+    whose comparison cannot be made is `stale: null`, never `false` -- the
+    rollback signal must not be swallowed by an unknown."""
+    bundle = tmp_path / "live"
+    bundle.mkdir()
+    (bundle / "a.md").write_bytes(b"first\n")
+    client = TestClient(create_app(load_config(env={"CKP_BUNDLE_ROOT": str(bundle)})))
+    assert client.get("/revision").json()["stale"] is False  # baseline serve
+
+    import ckp.app as app_module
+
+    real_build = app_module.build_revision
+
+    def build_with_unknown_index(config, cache):
+        revision = real_build(config, cache)
+        return type(revision)(
+            profile_version=revision.profile_version,
+            api_version=revision.api_version,
+            bundle_commit=revision.bundle_commit,
+            index_revision=None,
+            sources=revision.sources,
+        )
+
+    monkeypatch.setattr(app_module, "build_revision", build_with_unknown_index)
+    payload = client.get("/revision").json()
+    assert payload["stale"] is None, payload

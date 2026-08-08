@@ -93,12 +93,14 @@ class RevisionResponse(BaseModel):
         description="Where each field came from, so self-declared and derived "
         "evidence stay distinguishable"
     )
-    stale: bool = Field(
+    stale: bool | None = Field(
         description="True when the snapshot other routes were serving just "
         "before this request no longer matches a fresh recomputation from "
         "the bundle root -- contract §5.5's rollback trigger made "
-        "observable. False (not 'unknown') when nothing was served yet, "
-        "since there is no prior snapshot to have drifted from."
+        "observable. False when nothing was served yet (no prior snapshot "
+        "to have drifted from) or when both revisions are known and equal. "
+        "null when a snapshot was served but either revision cannot be "
+        "determined: unknown is reported as unknown, never as fresh."
     )
 
 
@@ -223,10 +225,20 @@ def create_app(
         # explicit): pilot-scale bundles make it cheap, and only /revision
         # pays it -- /catalog and /query were already paying the same cost
         # via SnapshotCache.get()'s per-call verification.
-        stale = (
-            served_before is not None
-            and served_before.index_revision != current.index_revision
-        )
+        # Codex round 1 on #39: `None != None` is False, so "either side's
+        # revision is unknown" read as *fresh* -- the recurring
+        # unknown-reported-as-a-verdict shape, here at the exact rollback
+        # signal §5.5 exists to protect. Three-valued now: False only when
+        # both revisions are known and equal (or nothing was ever served),
+        # True only when both are known and differ, None when a snapshot was
+        # served but either revision cannot be determined -- unknown is said
+        # plainly, never dressed as fresh.
+        if served_before is None:
+            stale: bool | None = False
+        elif served_before.index_revision is None or current.index_revision is None:
+            stale = None
+        else:
+            stale = served_before.index_revision != current.index_revision
         return RevisionResponse(**current.as_dict(), stale=stale)
 
     def unavailable() -> HTTPException:
