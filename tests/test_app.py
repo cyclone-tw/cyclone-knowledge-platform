@@ -181,6 +181,67 @@ def test_revision_is_recomputed_per_request(tmp_path) -> None:
     assert after == compute_index_revision(bundle, "**/*.md")
 
 
+# --- #39: /revision flags staleness against a previously served snapshot --
+
+
+def test_revision_stale_is_false_on_the_first_call_an_app_ever_serves(
+    tmp_path,
+) -> None:
+    """Nothing was served before the first call, so there is nothing to
+    have drifted from -- 'never served' must not be misread as 'stale'."""
+    bundle = tmp_path / "live"
+    bundle.mkdir()
+    (bundle / "a.md").write_bytes(b"first\n")
+    client = TestClient(create_app(load_config(env={"CKP_BUNDLE_ROOT": str(bundle)})))
+
+    assert client.get("/revision").json()["stale"] is False
+
+
+def test_revision_stale_stays_false_with_no_intervening_edit(tmp_path) -> None:
+    bundle = tmp_path / "live"
+    bundle.mkdir()
+    (bundle / "a.md").write_bytes(b"first\n")
+    client = TestClient(create_app(load_config(env={"CKP_BUNDLE_ROOT": str(bundle)})))
+
+    client.get("/revision")
+    assert client.get("/revision").json()["stale"] is False
+
+
+def test_revision_flags_stale_after_the_bundle_changes_underneath_it(
+    tmp_path,
+) -> None:
+    """Contract §5.5's rollback trigger, made observable: a revision
+    mismatch must show up as an explicit stale=true, not silently."""
+    bundle = tmp_path / "live"
+    bundle.mkdir()
+    (bundle / "a.md").write_bytes(b"first\n")
+    client = TestClient(create_app(load_config(env={"CKP_BUNDLE_ROOT": str(bundle)})))
+
+    client.get("/revision")  # materializes the cache's first snapshot
+    (bundle / "a.md").write_bytes(b"second\n")
+
+    stale_response = client.get("/revision").json()
+    assert stale_response["stale"] is True
+    # The field this request reports is still the fresh, correct value --
+    # staleness is signaled by the flag, not by serving old data.
+    assert stale_response["index_revision"] == compute_index_revision(bundle, "**/*.md")
+
+
+def test_revision_stale_flag_self_heals_on_the_next_call(tmp_path) -> None:
+    """Contract §5.5 asks for the mismatch to be *flagged*, not for the
+    service to keep refusing -- the very next call, with nothing further
+    changed, must read stale=false again."""
+    bundle = tmp_path / "live"
+    bundle.mkdir()
+    (bundle / "a.md").write_bytes(b"first\n")
+    client = TestClient(create_app(load_config(env={"CKP_BUNDLE_ROOT": str(bundle)})))
+
+    client.get("/revision")
+    (bundle / "a.md").write_bytes(b"second\n")
+    assert client.get("/revision").json()["stale"] is True
+    assert client.get("/revision").json()["stale"] is False
+
+
 def test_health_is_degraded_when_a_note_cannot_be_read(tmp_path) -> None:
     """End to end for the listable-but-unreadable case."""
     import os
@@ -223,3 +284,34 @@ def test_api_version_is_bound_to_the_constant_not_copied(monkeypatch) -> None:
     assert client.app.version == sentinel
     assert client.get("/openapi.json").json()["info"]["version"] == sentinel
     assert client.get("/revision").json()["api_version"] == sentinel
+
+
+def test_revision_reports_unknown_not_fresh_when_a_revision_is_undeterminable(
+    tmp_path, monkeypatch
+):
+    """Codex round 1 on #39: `None != None` read as fresh. A served snapshot
+    whose comparison cannot be made is `stale: null`, never `false` -- the
+    rollback signal must not be swallowed by an unknown."""
+    bundle = tmp_path / "live"
+    bundle.mkdir()
+    (bundle / "a.md").write_bytes(b"first\n")
+    client = TestClient(create_app(load_config(env={"CKP_BUNDLE_ROOT": str(bundle)})))
+    assert client.get("/revision").json()["stale"] is False  # baseline serve
+
+    import ckp.app as app_module
+
+    real_build = app_module.build_revision
+
+    def build_with_unknown_index(config, cache):
+        revision = real_build(config, cache)
+        return type(revision)(
+            profile_version=revision.profile_version,
+            api_version=revision.api_version,
+            bundle_commit=revision.bundle_commit,
+            index_revision=None,
+            sources=revision.sources,
+        )
+
+    monkeypatch.setattr(app_module, "build_revision", build_with_unknown_index)
+    payload = client.get("/revision").json()
+    assert payload["stale"] is None, payload

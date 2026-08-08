@@ -1,26 +1,28 @@
-"""P6 resilience benchmark (issue #27): Gateway down, stale snapshot, and
-MacBook offline as observable, independently asserted dimensions.
+"""P6 resilience benchmark (issue #27, #39): Gateway down, stale snapshot,
+and MacBook offline as observable, independently asserted dimensions.
 
-Every scenario function under test is exercised twice: once through the
-full scenario (real FastAPI app / real ``plan_rebuild`` / real
-``OfflineQmdScope``) and once through the small pure evaluator it is built
-on (``_is_explicit_error``, ``_is_snapshot_stale``, ``_denied_with``). The
-evaluator-level tests are what catches the regressions the issue and its
-Round 1 review call out explicitly:
+Most scenario functions under test are exercised twice: once through the
+full scenario (real FastAPI app / real ``OfflineQmdScope``) and once through
+the small pure evaluator it is built on (``_is_explicit_error``,
+``_denied_with``). The evaluator-level tests are what catches the
+regressions the issue and its Round 1 review call out explicitly:
 
-* stale snapshot not flagged as stale,
 * Gateway down answered with an empty 200 instead of an explicit error,
 * Gateway down answered with a 5xx wearing a zero-result listing schema
   (Round 1 nit 2),
-* an offline scope check that lets an out-of-scope request through,
-* ``all_passed`` turning True because the stale-snapshot *comparator* is
-  correct, even though production has no stale-detection path at all
-  (Round 1 blocking finding -- see
-  ``test_all_passed_cannot_become_true_from_the_benchmark_comparator_alone``).
+* an offline scope check that lets an out-of-scope request through.
 
-Each of those is reproduced here as a direct "would this evaluator have
-caught it" case, and was also hand-verified red/green against a temporarily
-mutated copy of ``benchmarks/resilience.py`` during development (see the
+``check_stale_snapshot`` (#39) has no benchmark-only evaluator left to test
+separately -- it drives the real ``GET /revision`` endpoint end to end, so
+its own test below (``test_stale_snapshot_scenario_passes_against_the_real_endpoint``)
+*is* the direct regression guard: it is what turns red if production's
+staleness flag (``ckp/app.py``'s ``revision()`` handler, or
+``SnapshotCache.peek()`` in ``ckp/bundle.py``) is removed or defanged --
+see ``scripts/test-c3-mutations.sh``'s "production staleness flag" mutation
+case, which mutates exactly that and points at this test.
+
+Each of these was also hand-verified red/green against a temporarily
+mutated copy of the relevant source during development (see the
 coding-session report for the mutation log); the mutation itself is not
 committed.
 """
@@ -36,7 +38,6 @@ from benchmarks.resilience import (
     ScenarioOutcome,
     _denied_with,
     _is_explicit_error,
-    _is_snapshot_stale,
     _looks_like_listing_schema,
     check_offline_scope_fail_closed,
     check_stale_snapshot,
@@ -148,25 +149,6 @@ def test_looks_like_listing_schema_matches_only_known_response_shapes() -> None:
 
 
 # --------------------------------------------------------------------------
-# _is_snapshot_stale: the stale-snapshot evaluator.
-# --------------------------------------------------------------------------
-
-
-def test_snapshot_stale_when_revisions_diverge() -> None:
-    assert _is_snapshot_stale("sha256:aaa", "sha256:bbb") is True
-
-
-def test_snapshot_not_stale_when_revisions_match() -> None:
-    assert _is_snapshot_stale("sha256:aaa", "sha256:aaa") is False
-
-
-def test_snapshot_stale_when_live_revision_unreadable() -> None:
-    """An unrecomputable live revision must read as stale, not as
-    "cannot tell" -- AGENTS.md §8's honest-metadata rule."""
-    assert _is_snapshot_stale("sha256:aaa", None) is True
-
-
-# --------------------------------------------------------------------------
 # _denied_with: the offline fail-closed evaluator.
 # --------------------------------------------------------------------------
 
@@ -221,31 +203,29 @@ def test_gateway_down_fails_closed_on_every_surface() -> None:
         assert entry["is_explicit_error"] is True
 
 
-def test_stale_snapshot_comparator_is_correct_but_scenario_never_passes() -> None:
-    """Codex Round 1 blocking finding: the benchmark's own comparator
-    behaving correctly must never be reported as the scenario "passing",
-    because production has no stale-detection code path at all (#39). The
-    two must stay visibly separate in the outcome."""
+def test_stale_snapshot_scenario_passes_against_the_real_endpoint() -> None:
+    """#39: this scenario now drives the real ``GET /revision`` endpoint,
+    not a benchmark-only comparator. This is the direct regression guard
+    for production's staleness flag -- if ``ckp/app.py``'s ``revision()``
+    handler stops comparing ``SnapshotCache.peek()`` against a fresh
+    recomputation (or always reports ``stale=False``), this test goes red.
+    See ``scripts/test-c3-mutations.sh``'s matching mutation case."""
     outcome = check_stale_snapshot()
 
     assert outcome.scenario == "stale_snapshot"
-    # The comparator itself is correct...
-    assert outcome.observed["flagged_stale_when_unedited"] is False
-    assert outcome.observed["flagged_stale_after_edit"] is True
-    assert outcome.observed["benchmark_comparison_passed"] is True
+    assert outcome.observed["first_call_stale"] is False
+    assert outcome.observed["unedited_call_stale"] is False
+    assert outcome.observed["after_edit_call_stale"] is True
+    assert outcome.observed["healed_call_stale"] is False
     assert (
-        outcome.observed["live_bundle_index_revision_unedited"]
-        == outcome.observed["served_bundle_index_revision"]
+        outcome.observed["index_revision_after_edit"]
+        != outcome.observed["index_revision_before_edit"]
     )
-    assert (
-        outcome.observed["live_bundle_index_revision_after_edit"]
-        != outcome.observed["served_bundle_index_revision"]
-    )
-    # ...but that correctness must never be presented as the scenario
-    # passing: production has no detection path to actually run.
-    assert outcome.passed is False
+    # A real production detection path now backs this scenario, so a
+    # correct measurement is reported as passing.
+    assert outcome.passed is True
     assert outcome.observed["production_detection"] == PRODUCTION_STALE_DETECTION_STATUS
-    assert outcome.observed["production_detection"] == "not-implemented"
+    assert outcome.observed["production_detection"] == "implemented"
 
 
 def test_offline_scope_stays_fail_closed() -> None:
@@ -275,34 +255,16 @@ def test_run_resilience_benchmark_reports_all_three_dimensions() -> None:
     }
     for entry in report["scenarios"].values():
         assert isinstance(entry["assertion"], str) and entry["assertion"]
-    # Both surfaces that are actually production-verified pass...
+    # All three dimensions are now production-verified (#39 closed the
+    # stale-snapshot gap), so all_passed can legitimately be True.
     assert report["scenarios"]["gateway_down"]["passed"] is True
     assert report["scenarios"]["macbook_offline"]["passed"] is True
-    # ...but stale_snapshot never does, because production cannot yet run
-    # this comparison at all (#39) -- so the top-level all_passed must stay
-    # False too, not get rounded up by the other two scenarios.
-    assert report["scenarios"]["stale_snapshot"]["passed"] is False
+    assert report["scenarios"]["stale_snapshot"]["passed"] is True
     assert (
         report["scenarios"]["stale_snapshot"]["observed"]["production_detection"]
-        == "not-implemented"
+        == "implemented"
     )
-    assert report["all_passed"] is False
-
-
-def test_all_passed_cannot_become_true_from_the_benchmark_comparator_alone() -> None:
-    """Direct pin of the Codex Round 1 blocking requirement, independent of
-    the "reports all three dimensions" test above: even though the stale
-    comparator is provably correct (see
-    ``test_stale_snapshot_comparator_is_correct_but_scenario_never_passes``),
-    ``all_passed`` must still be False. A mutation that made ``passed``
-    track ``benchmark_comparison_passed`` instead of staying hardcoded
-    False would flip this to True and must turn this test red."""
-    report = run_resilience_benchmark()
-
-    stale = report["scenarios"]["stale_snapshot"]
-    assert stale["observed"]["benchmark_comparison_passed"] is True
-    assert stale["passed"] is False
-    assert report["all_passed"] is False
+    assert report["all_passed"] is True
 
 
 def test_report_is_json_serializable_including_timestamps() -> None:
@@ -314,7 +276,7 @@ def test_report_is_json_serializable_including_timestamps() -> None:
     # rather than only through the CLI path.
     serialized = json.dumps(report, default=str)
     reloaded = json.loads(serialized)
-    assert reloaded["all_passed"] is False
+    assert reloaded["all_passed"] is True
     assert reloaded["scenarios"]["gateway_down"]["passed"] is True
 
 
@@ -329,7 +291,7 @@ def test_now_constant_is_timezone_aware() -> None:
     ("scenario_fn", "expected_passed"),
     [
         (probe_gateway_down, True),
-        (check_stale_snapshot, False),
+        (check_stale_snapshot, True),
         (check_offline_scope_fail_closed, True),
     ],
 )
@@ -337,9 +299,8 @@ def test_every_scenario_is_independently_callable(scenario_fn, expected_passed) 
     """Each scenario is its own function with no shared mutable state --
     calling one twice, or calling them out of order, must not change the
     outcome (guards against accidental cross-scenario coupling). Each
-    function's expected verdict is pinned individually rather than
-    "all True": stale_snapshot must always land on False (see the
-    dedicated test above for why)."""
+    scenario builds its own temporary bundle/app, so two calls to the same
+    function must not observe each other's edits."""
     first = scenario_fn()
     second = scenario_fn()
     assert first.passed == second.passed == expected_passed

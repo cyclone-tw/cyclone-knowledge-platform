@@ -98,6 +98,36 @@ def test_empty_bundle_has_an_honest_unavailable_snapshot(tmp_path: Path) -> None
     assert snapshot.index_revision is None
 
 
+def test_peek_is_none_before_the_first_get(tmp_path: Path) -> None:
+    """#39: /revision compares peek() against a fresh recompute. Before any
+    request has ever been served, there is nothing to have gone stale from,
+    so peek() must be None rather than an invented snapshot."""
+    cache = _cache(tmp_path)
+    assert cache.peek() is None
+
+
+def test_peek_returns_the_last_snapshot_get_materialized(tmp_path: Path) -> None:
+    (tmp_path / "a.md").write_bytes(b"one\n")
+    cache = _cache(tmp_path)
+    served = cache.get()
+    assert cache.peek() is served
+
+
+def test_peek_never_reprobes_the_filesystem(tmp_path: Path) -> None:
+    """The whole point of peek(): unlike get(), it must report what was
+    served *before* this call, even if the bundle changed on disk since."""
+    note = tmp_path / "a.md"
+    note.write_bytes(b"one\n")
+    cache = _cache(tmp_path)
+    before = cache.get()
+
+    note.write_bytes(b"two\n")
+    peeked = cache.peek()
+
+    assert peeked is before
+    assert peeked.index_revision != cache.get().index_revision
+
+
 def test_cache_does_not_publish_when_before_and_after_probes_disagree(
     tmp_path: Path, monkeypatch
 ) -> None:
