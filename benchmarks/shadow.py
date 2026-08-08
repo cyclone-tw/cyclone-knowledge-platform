@@ -362,21 +362,18 @@ def run_shadow_benchmark(
     admit -- so every real question's retrieval was a guaranteed miss before
     a single query ran.
 
-    Deliberately **not** parametrized: the ``filter_privacy`` argument this
-    module passes to each ``index_provider.search()`` call, which stays
-    hardcoded to ``_PUBLIC_ONLY`` regardless of ``index_admissible``. Every
-    concrete ``VectorIndexProvider`` this repo ships validates that argument
-    via ``ckp.index.models.require_public_filter`` (exact equality to
-    ``{PrivacyClass.PUBLIC}``, unrelated to and unaware of
-    ``index_admissible``) but **never actually uses it to filter which
-    points a search can return** -- every provider scores every point in the
-    rebuilt plan with no per-point privacy check, because ``IndexedPoint``
-    itself carries no privacy field. So passing anything other than
-    ``_PUBLIC_ONLY`` there would only ever raise ``IndexRefusal`` without
-    changing what comes back; the real fix is entirely on the index-build
-    side (``index_admissible`` above), and leaving ``filter_privacy`` as
-    ``_PUBLIC_ONLY`` here is intentional, not an oversight left over from
-    Round 1.
+    ``index_provider.search()`` takes no privacy filter of its own (issue
+    #45): a prior ``filter_privacy`` argument was validated by every
+    concrete ``VectorIndexProvider`` this repo ships (exact equality to
+    ``{PrivacyClass.PUBLIC}``) but **never actually used to filter which
+    points a search could return** -- every provider scored every point in
+    the rebuilt plan with no per-point privacy check, because
+    ``IndexedPoint`` itself carries no privacy field. That parameter implied
+    a second privacy gate at query time that did not exist, which became
+    actively misleading once #26 let an index legitimately contain
+    ``internal`` points -- so it was removed rather than implemented. The
+    real (and only) privacy gate stays entirely on the index-build side
+    (``index_admissible`` above, forwarded into ``plan_rebuild``).
 
     ``trials`` controls how many times each question is re-run against each
     engine purely for the latency sample (default
@@ -537,9 +534,7 @@ def run_shadow_benchmark(
 
         started = time.perf_counter()
         query_vector = stack.embedding.embed_query(question.query).values
-        vector = index_provider.search(
-            query_vector, top_k=top_k, filter_privacy=_PUBLIC_ONLY
-        )
+        vector = index_provider.search(query_vector, top_k=top_k)
         vector_trial_samples.append(time.perf_counter() - started)
         raw_vector_paths = tuple(hit.relative_path for hit in vector.hits)
 
@@ -554,9 +549,7 @@ def run_shadow_benchmark(
 
             started = time.perf_counter()
             repeat_vector = stack.embedding.embed_query(question.query).values
-            index_provider.search(
-                repeat_vector, top_k=top_k, filter_privacy=_PUBLIC_ONLY
-            )
+            index_provider.search(repeat_vector, top_k=top_k)
             vector_trial_samples.append(time.perf_counter() - started)
 
         # QMD baseline (issue #24): one call per question, never repeated

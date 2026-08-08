@@ -102,12 +102,7 @@ def test_two_empty_volumes_rebuild_identically() -> None:
     assert left_report == right_report
 
     query = deterministic_stack().embedding.embed_query("tide caves mapping").values
-    from ckp.privacy import PrivacyClass
-
-    public = frozenset({PrivacyClass.PUBLIC})
-    assert left.search(query, top_k=5, filter_privacy=public) == right.search(
-        query, top_k=5, filter_privacy=public
-    )
+    assert left.search(query, top_k=5) == right.search(query, top_k=5)
 
 
 def test_a_content_change_changes_the_composed_revision() -> None:
