@@ -52,6 +52,7 @@ def test_c5_expected_index_modules_are_present() -> None:
         "__init__.py",
         "questions.py",
         "export_compare.py",
+        "gate.py",
         "resilience.py",
         "shadow.py",
         "token_cost.py",
