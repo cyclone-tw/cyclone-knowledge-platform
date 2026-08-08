@@ -79,7 +79,12 @@ def _provenance_block(
 
 
 def _real_question(
-    question_id: str, *, hit: bool, qmd_hit: bool, qmd_cost: int | None
+    question_id: str,
+    *,
+    hit: bool,
+    qmd_hit: bool,
+    qmd_cost: int | None,
+    lexical_cost: int | None = 35,
 ) -> dict:
     return {
         "question_id": question_id,
@@ -92,8 +97,8 @@ def _real_question(
             "paths": [f"Core/{question_id}.md"] if hit else [],
             "hit": hit,
             "result_count": 1 if hit else 0,
-            "token_cost": 35,
-            "token_cost_measured": True,
+            "token_cost": lexical_cost,
+            "token_cost_measured": lexical_cost is not None,
             "stale_returned": False,
         },
         "vector": {
@@ -151,6 +156,11 @@ def base_report(
                 if real_qmd_token_cost_unmeasured >= 1
                 else real_qmd_token_cost_total // 2
             ),
+            lexical_cost=(
+                None
+                if real_lexical_token_cost_unmeasured >= 1
+                else real_lexical_token_cost_total // 2
+            ),
         ),
         _real_question(
             "r02",
@@ -160,6 +170,11 @@ def base_report(
                 None
                 if real_qmd_token_cost_unmeasured >= 2
                 else real_qmd_token_cost_total - real_qmd_token_cost_total // 2
+            ),
+            lexical_cost=(
+                None
+                if real_lexical_token_cost_unmeasured >= 2
+                else real_lexical_token_cost_total - real_lexical_token_cost_total // 2
             ),
         ),
     ]
@@ -509,6 +524,125 @@ def test_fully_measured_token_totals_compare_normally() -> None:
         base_report(real_lexical_token_cost_total=120, real_qmd_token_cost_total=80)
     )
     assert _item(failing, "context_token_total")["status"] == "fail"
+
+
+def test_token_comparison_reads_only_the_qmd_hit_subset() -> None:
+    """Epic #21 D1 clarification (#62): same-work comparison.
+
+    QMD misses r02; the platform answers it and pays 85 there (120 pooled
+    vs QMD's pooled 80, so the pre-#62 pooled rule would fail). On the
+    same-work subset -- r01 alone -- the platform pays 35 against QMD's
+    40 and passes. A mutation that folds QMD-missed questions back into
+    either total (the pooled rule) flips this test red; that is the
+    mutation this test exists to catch.
+    """
+    report = base_report(
+        real_qmd_hits=1,
+        real_lexical_token_cost_total=120,
+        real_qmd_token_cost_total=80,
+    )
+    report["questions"][0]["lexical"]["token_cost"] = 35
+    report["questions"][1]["lexical"]["token_cost"] = 85
+
+    result = gate.evaluate_gate(report)
+    item = _item(result, "context_token_total")
+
+    assert item["status"] == "pass"
+    assert item["detail"]["compared_question_ids"] == ["r01"]
+    assert item["detail"]["platform_lexical_token_cost_total_on_subset"] == 35
+    assert item["detail"]["qmd_token_cost_total_on_subset"] == 40
+    assert (
+        item["detail"]["pooled_platform_lexical_token_cost_total_informational"] == 120
+    )
+    assert item["detail"]["pooled_qmd_token_cost_total_informational"] == 80
+
+
+def test_token_comparison_still_fails_when_the_subset_itself_is_worse() -> None:
+    """Same-work is a clarification, not a loosening: pay more than QMD on
+    the questions QMD itself answered and the dimension still fails."""
+    report = base_report(
+        real_qmd_hits=1,
+        real_lexical_token_cost_total=120,
+        real_qmd_token_cost_total=40,
+    )
+    report["questions"][0]["lexical"]["token_cost"] = 90
+    report["questions"][1]["lexical"]["token_cost"] = 30
+
+    result = gate.evaluate_gate(report)
+    item = _item(result, "context_token_total")
+
+    assert item["status"] == "fail"
+    assert "same-work subset" in item["reason"]
+
+
+def test_unmeasured_tokens_outside_the_subset_do_not_block_evaluation() -> None:
+    """The residual-total rule now scopes to the compared subset: an
+    unmeasured platform cost on a question QMD missed is reported in the
+    pooled informational numbers but must not void the same-work verdict
+    (under the pooled rule it did -- that question was never comparable
+    work in the first place)."""
+    report = base_report(real_qmd_hits=1)
+    report["questions"][1]["lexical"]["token_cost"] = None
+    report["questions"][1]["lexical"]["token_cost_measured"] = False
+    real_summary = report["summary"]["provenance"]["real"]
+    real_summary["lexical_token_cost_total"] = 35
+    real_summary["lexical_token_cost_unmeasured_questions"] = 1
+
+    result = gate.evaluate_gate(report)
+    item = _item(result, "context_token_total")
+
+    assert item["status"] == "pass"
+    assert (
+        item["detail"][
+            "pooled_platform_lexical_token_cost_unmeasured_questions_informational"
+        ]
+        == 1
+    )
+
+
+def test_token_totals_equal_on_the_subset_pass() -> None:
+    """D1 says "not higher than" -- equality passes. Pins the ``<=`` so a
+    strictness mutation (``<``) cannot quietly demand the platform beat
+    the baseline it is only required to match."""
+    report = base_report(real_lexical_token_cost_total=80, real_qmd_token_cost_total=80)
+    result = gate.evaluate_gate(report)
+    assert _item(result, "context_token_total")["status"] == "pass"
+
+
+def test_no_qmd_baseline_reports_absent_costs_as_none_not_zero() -> None:
+    """Codex round 1 on #65: with ``qmd_compared`` False there is no QMD
+    baseline anywhere, and ``_real_qmd_stats``'s zero-initialized totals
+    must not surface as "the baseline cost 0" -- absent evidence is
+    reported as absent (None), never folded into a number."""
+    report = base_report(qmd_compared=False)
+    result = gate.evaluate_gate(report)
+    item = _item(result, "context_token_total")
+
+    assert item["status"] == "not_evaluable"
+    detail = item["detail"]
+    assert detail["pooled_qmd_token_cost_total_informational"] is None
+    assert detail["pooled_qmd_token_cost_unmeasured_questions_informational"] is None
+    assert detail["compared_question_ids"] == []
+    assert detail["platform_lexical_token_cost_total_on_subset"] is None
+    assert detail["qmd_token_cost_total_on_subset"] is None
+
+
+def test_empty_same_work_subset_never_passes() -> None:
+    """Defense in depth below evaluate_gate: the #58 degenerate-baseline
+    rule intercepts a zero-hit QMD before this dimension runs, so the
+    empty-subset branch is unreachable through evaluate_gate by
+    construction -- but the function must stay honest when called
+    directly (an empty subset compares nothing; 0 <= 0 must not pass)."""
+    report = base_report(real_qmd_hits=0)
+    item = gate._gate_context_token_total(report, gate._real_qmd_stats(report))
+
+    assert item["status"] == "not_evaluable"
+    assert "same-work subset is empty" in item["reason"]
+    # An empty subset's totals are "nothing to total", never 0 -- while the
+    # pooled numbers stay numeric here, because QMD did run and pay.
+    assert item["detail"]["platform_lexical_token_cost_total_on_subset"] is None
+    assert item["detail"]["qmd_token_cost_total_on_subset"] is None
+    assert item["detail"]["pooled_qmd_token_cost_total_informational"] is not None
 
 
 # --- RP3: semantic=false vector must never decide a gate outcome -----------

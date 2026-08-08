@@ -25,6 +25,29 @@ from ckp.privacy import PrivacyGate
 _MAX_SNIPPET = 320
 _WHITESPACE = re.compile(r"\s+")
 
+#: Relevance cutoff (issue #62). Both bars are derived from the measured
+#: score distribution of the 16-question benchmark set against the real
+#: pilot corpus (per-result scores, coverage, and field decomposition are
+#: in #62), not picked by feel:
+#:
+#: * ``_CUTOFF_FLOOR``: every observed score-1 result was a single generic
+#:   token matching in one field (body or metadata) -- noise in all 16
+#:   distributions -- and no expected result anywhere scored below 2. The
+#:   floor is capped at the query's own token count: every benchmark
+#:   question has three or more tokens, so the measured "score 1 is noise"
+#:   claim is evidence about matching a small fraction of a longer query,
+#:   not about single-token queries, where a score-1 body match is full
+#:   coverage of everything the caller asked and must stay servable.
+#: * ``_CUTOFF_RATIO_*``: no expected result scored below 2/3 of its
+#:   question's top score, and the bound is tight -- the cross-note
+#:   question q06's second expected note sits at exactly 2 against a top
+#:   of 3, so any stricter ratio starts dropping correct answers. The
+#:   comparison is done in integers (``3 * score >= 2 * top``) so no
+#:   float rounding can move that boundary.
+_CUTOFF_FLOOR = 2
+_CUTOFF_RATIO_NUM = 2
+_CUTOFF_RATIO_DEN = 3
+
 
 class GatewayPolicyError(ValueError):
     """The composition root supplied inconsistent privacy dependencies."""
@@ -66,7 +89,21 @@ def query_response(
     catalog: CatalogSnapshot,
     request: QueryRequest,
 ) -> QueryResponse:
-    """Rank one already privacy-gated Catalog and add bound citations."""
+    """Rank one already privacy-gated Catalog and add bound citations.
+
+    Scored entries pass a relevance cutoff before pagination (issue #62):
+    an entry is served only when its score clears both the absolute floor
+    (``_CUTOFF_FLOOR``) and the top-relative bar (``_CUTOFF_RATIO_NUM /
+    _CUTOFF_RATIO_DEN`` of the highest score for this query). Weak
+    generic-token matches -- score>0 was the only bar before -- previously
+    rode along in every response and dominated its token weight.
+
+    ``total`` counts the results that survive the cutoff, not the raw
+    score>0 match count: it is the number of results a caller could
+    actually page through with ``limit``/``offset``-style requests, and a
+    served relevance policy that hides a result from every page must not
+    still advertise it in the count.
+    """
     tokens = _tokens(request.query)
     scored = [
         (score, entry)
@@ -74,6 +111,15 @@ def query_response(
         if (score := _score(entry, tokens)) > 0
     ]
     scored.sort(key=lambda item: (-item[0], item[1].concept_id))
+    if scored:
+        top_score = scored[0][0]
+        floor = min(_CUTOFF_FLOOR, len(tokens))
+        scored = [
+            (score, entry)
+            for score, entry in scored
+            if score >= floor
+            and _CUTOFF_RATIO_DEN * score >= _CUTOFF_RATIO_NUM * top_score
+        ]
     total = len(scored)
     results = [
         QueryResultResponse(

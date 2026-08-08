@@ -314,22 +314,25 @@ def test_provenance_split_covers_stale_exclusion_with_correct_denominators() -> 
     """Issue #26 Round 3 (Codex Finding): stale exclusion was still pooled-
     only after Round 2 split hit rate/token cost/citation.
 
-    Both engines here always return *something* up to ``top_k`` even for an
-    off-topic query -- documented behavior (module docstring: "a cosine
-    engine always ranks *something*"), and the lexical side over this
-    fixture corpus does too -- so ``REAL_QUESTIONS[0]`` mixed into the
-    default synthetic-only fixture corpus reliably gets back the same
-    top-3 spillover on both engines, which happens to include the
-    superseded note: a real question can never be a *correct* hit (D2's
-    real notes are never in this fixture corpus at all), but it can
-    absolutely be an *honest* stale-exclusion failure, exactly like any
-    other question. Pinned empirically (see the values asserted below) as
-    a real, deterministic real/synthetic asymmetry, not a contrived one:
-    the synthetic block is imperfect for a different, already-tested
-    reason (``q04-latest-status``'s legitimate superseded pair), and the
-    real block is imperfect for this one -- two different rates, from two
-    different causes, which is exactly what must never collapse into one
-    pooled number.
+    The vector engine always returns *something* up to ``top_k`` even for
+    an off-topic query -- documented behavior (module docstring: "a cosine
+    engine always ranks *something*") -- so ``REAL_QUESTIONS[0]`` mixed
+    into the default synthetic-only fixture corpus reliably gets back
+    top-3 spillover that happens to include the superseded note: a real
+    question can never be a *correct* hit here (D2's real notes are never
+    in this fixture corpus at all), but it can absolutely be an *honest*
+    stale-exclusion failure. The lexical side used to spill the same way,
+    but the #62 relevance cutoff now cuts every weak cross-corpus match
+    for this query (its returns are empty), which counts as excluded
+    under the documented "no superseded path in what was returned"
+    accounting -- the module docstring's own caveat that an empty answer
+    is indistinguishable from a correct exclusion. Pinned empirically
+    (see the values asserted below) as a real, deterministic asymmetry on
+    both axes: synthetic vs real (two different causes -- ``q04-latest-
+    status``'s legitimate superseded pair vs off-topic spillover), and
+    now lexical vs vector on the same real question (cutoff vs RP3's
+    uncut informational engine), which is exactly what must never
+    collapse into one pooled number.
 
     Also pins the denominator: each provenance's rate must divide by that
     provenance's own question count, never by the pooled
@@ -354,13 +357,15 @@ def test_provenance_split_covers_stale_exclusion_with_correct_denominators() -> 
     assert synthetic["lexical_stale_excluded_rate"] == round(9 / len(QUESTIONS), 4)
     assert synthetic["vector_stale_excluded_rate"] == round(8 / len(QUESTIONS), 4)
 
-    # The one real question: both engines' top-k spillover for this query
-    # happens to include the superseded note, so it is *not* excluded --
-    # pinned to the observed, deterministic value (0 of 1), not assumed.
+    # The one real question, engine by engine: the #62 cutoff empties the
+    # lexical answer (excluded, 1 of 1, per the documented empty-answer
+    # caveat) while the uncut vector spillover still returns the
+    # superseded note (not excluded, 0 of 1) -- pinned to the observed,
+    # deterministic values, not assumed.
     assert real["question_count"] == 1
-    assert real["lexical_stale_excluded"] == 0
+    assert real["lexical_stale_excluded"] == 1
     assert real["vector_stale_excluded"] == 0
-    assert real["lexical_stale_excluded_rate"] == 0.0
+    assert real["lexical_stale_excluded_rate"] == 1.0
     assert real["vector_stale_excluded_rate"] == 0.0
 
     # The two provenances must disagree -- proves the rate is not silently
