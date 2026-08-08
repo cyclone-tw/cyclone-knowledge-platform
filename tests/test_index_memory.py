@@ -16,7 +16,6 @@ from ckp.index import (
     require_index_provider,
 )
 from ckp.index.errors import IndexErrorCode, IndexRefusal
-from ckp.privacy import PrivacyClass
 from index_fixtures import (
     DIMENSION,
     corpus_members,
@@ -24,8 +23,6 @@ from index_fixtures import (
     make_member,
     public_gate,
 )
-
-PUBLIC = frozenset({PrivacyClass.PUBLIC})
 
 
 def _plan(members=None):
@@ -54,7 +51,7 @@ def test_rebuild_reports_the_plan_and_admission_passes() -> None:
 def test_search_before_rebuild_fails_closed() -> None:
     index = InMemoryVectorIndex()
     with pytest.raises(IndexRefusal) as caught:
-        index.search(_query("anything"), top_k=3, filter_privacy=PUBLIC)
+        index.search(_query("anything"), top_k=3)
     assert caught.value.code is IndexErrorCode.NOT_BUILT
 
 
@@ -63,32 +60,21 @@ def test_search_orders_truncates_and_guards() -> None:
     plan = _plan()
     index.rebuild(plan)
 
-    result = index.search(
-        _query("espresso grind dial grams"), top_k=3, filter_privacy=PUBLIC
-    )
+    result = index.search(_query("espresso grind dial grams"), top_k=3)
     assert result.composed_revision == plan.composed_revision
     assert len(result.hits) == 3
     assert result.hits[0].relative_path == "espresso-dial-log.md"
     scores = [hit.score for hit in result.hits]
     assert scores == sorted(scores, reverse=True)
 
-    everything = index.search(
-        _query("synthetic note"), top_k=100, filter_privacy=PUBLIC
-    )
+    everything = index.search(_query("synthetic note"), top_k=100)
     assert len(everything.hits) == plan.indexed_count
 
     with pytest.raises(IndexRefusal) as caught:
-        index.search(_query("x"), top_k=0, filter_privacy=PUBLIC)
+        index.search(_query("x"), top_k=0)
     assert caught.value.code is IndexErrorCode.TOP_K_INVALID
     with pytest.raises(IndexRefusal) as caught:
-        index.search(
-            _query("x"),
-            top_k=3,
-            filter_privacy=frozenset({PrivacyClass.PUBLIC, PrivacyClass.INTERNAL}),
-        )
-    assert caught.value.code is IndexErrorCode.PRIVACY_FILTER_INVALID
-    with pytest.raises(IndexRefusal) as caught:
-        index.search((1.0,), top_k=3, filter_privacy=PUBLIC)
+        index.search((1.0,), top_k=3)
     assert caught.value.code is IndexErrorCode.DIMENSION_MISMATCH
 
 
@@ -105,9 +91,7 @@ def test_equal_scores_tie_break_on_relative_path() -> None:
     index.rebuild(
         plan_rebuild(members=members, stack=deterministic_stack(), gate=public_gate())
     )
-    result = index.search(
-        _query("identical twin body words"), top_k=2, filter_privacy=PUBLIC
-    )
+    result = index.search(_query("identical twin body words"), top_k=2)
     assert [hit.relative_path for hit in result.hits] == ["twin-a.md", "twin-b.md"]
     assert result.hits[0].score == result.hits[1].score
 
@@ -123,9 +107,7 @@ def test_full_rebuild_replaces_the_previous_corpus() -> None:
             members=replacement, stack=deterministic_stack(), gate=public_gate()
         )
     )
-    result = index.search(
-        _query("espresso grind dial grams"), top_k=100, filter_privacy=PUBLIC
-    )
+    result = index.search(_query("espresso grind dial grams"), top_k=100)
     assert [hit.relative_path for hit in result.hits] == ["only.md"]
 
 
@@ -221,7 +203,7 @@ def test_rebuild_verifies_the_payload_digest() -> None:
         index.rebuild(forged)
     assert caught.value.code is IndexErrorCode.PLAN_INVALID
     with pytest.raises(IndexRefusal):
-        index.search(_query("x"), top_k=1, filter_privacy=PUBLIC)
+        index.search(_query("x"), top_k=1)
 
 
 def test_snapshot_restore_roundtrip_and_tamper_detection(tmp_path: Path) -> None:
@@ -236,8 +218,8 @@ def test_snapshot_restore_roundtrip_and_tamper_detection(tmp_path: Path) -> None
     assert report.composed_revision == plan.composed_revision
     assert report.payload_digest == plan.payload_digest
     query = _query("espresso grind dial grams")
-    original = index.search(query, top_k=5, filter_privacy=PUBLIC)
-    recovered = restored.search(query, top_k=5, filter_privacy=PUBLIC)
+    original = index.search(query, top_k=5)
+    recovered = restored.search(query, top_k=5)
     assert original == recovered
 
     payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
@@ -268,7 +250,7 @@ def test_wipe_forgets_everything() -> None:
     index.rebuild(_plan())
     index.wipe()
     with pytest.raises(IndexRefusal) as caught:
-        index.search(_query("x"), top_k=1, filter_privacy=PUBLIC)
+        index.search(_query("x"), top_k=1)
     assert caught.value.code is IndexErrorCode.NOT_BUILT
 
 
@@ -279,5 +261,5 @@ def test_dimension_guard_uses_the_plan(tmp_path: Path) -> None:
         "espresso"
     )
     with pytest.raises(IndexRefusal) as caught:
-        index.search(wrong.values, top_k=1, filter_privacy=PUBLIC)
+        index.search(wrong.values, top_k=1)
     assert caught.value.code is IndexErrorCode.DIMENSION_MISMATCH

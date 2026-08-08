@@ -26,7 +26,6 @@ from ckp.index import (
     compute_payload_digest,
     read_plan_snapshot,
     require_index_provider,
-    require_public_filter,
     require_query_vector,
     require_sealed_plan,
     require_top_k,
@@ -73,10 +72,9 @@ class ThirdPartyListIndex:
             payload_digest=plan.payload_digest,
         )
 
-    def search(self, query_vector, *, top_k, filter_privacy) -> SearchResult:
+    def search(self, query_vector, *, top_k) -> SearchResult:
         if self._rows is None or self._plan is None:
             raise IndexRefusal(IndexErrorCode.NOT_BUILT)
-        require_public_filter(filter_privacy)
         limit = require_top_k(top_k)
         vector = require_query_vector(query_vector, dimension=self._plan.dimension)
         scored = sorted(

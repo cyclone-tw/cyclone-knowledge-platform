@@ -18,10 +18,7 @@ from benchmarks.shadow import run_shadow_benchmark, strip_latency
 
 from ckp.index import InMemoryVectorIndex, QdrantVectorIndex, plan_rebuild
 from ckp.index.errors import IndexErrorCode, IndexRefusal
-from ckp.privacy import PrivacyClass
 from index_fixtures import corpus_members, deterministic_stack, public_gate
-
-PUBLIC = frozenset({PrivacyClass.PUBLIC})
 
 QDRANT_HOST = os.environ.get("CKP_QDRANT_HOST", "127.0.0.1")
 QDRANT_PORT = int(os.environ.get("CKP_QDRANT_PORT", "6333"))
@@ -120,8 +117,8 @@ def test_search_parity_with_the_reference_index() -> None:
             "軌道力學 module Kepler",
         ):
             vector = stack.embedding.embed_query(query).values
-            qdrant_hits = qdrant.search(vector, top_k=5, filter_privacy=PUBLIC)
-            memory_hits = memory.search(vector, top_k=5, filter_privacy=PUBLIC)
+            qdrant_hits = qdrant.search(vector, top_k=5)
+            memory_hits = memory.search(vector, top_k=5)
             assert [hit.relative_path for hit in qdrant_hits.hits] == [
                 hit.relative_path for hit in memory_hits.hits
             ]
@@ -138,7 +135,6 @@ def test_search_before_rebuild_fails_closed() -> None:
         index.search(
             deterministic_stack().embedding.embed_query("x").values,
             top_k=3,
-            filter_privacy=PUBLIC,
         )
     assert caught.value.code is IndexErrorCode.NOT_BUILT
 
@@ -228,7 +224,6 @@ def test_rebuild_wipes_stale_points() -> None:
         result = index.search(
             deterministic_stack().embedding.embed_query("espresso").values,
             top_k=100,
-            filter_privacy=PUBLIC,
         )
         assert [hit.relative_path for hit in result.hits] == ["only.md"]
     finally:

@@ -40,14 +40,12 @@ from ckp.index.models import (
     SearchHit,
     SearchResult,
     read_plan_snapshot,
-    require_public_filter,
     require_query_vector,
     require_sealed_plan,
     require_top_k,
     write_plan_snapshot,
 )
 from ckp.index.revision import INDEX_SCHEMA_VERSION
-from ckp.privacy import PrivacyClass
 
 QDRANT_INDEX_ID = "qdrant-local"
 QDRANT_INDEX_VERSION = "1"
@@ -147,10 +145,14 @@ class QdrantVectorIndex:
         query_vector: tuple[float, ...],
         *,
         top_k: int,
-        filter_privacy: frozenset[PrivacyClass],
     ) -> SearchResult:
+        """Score every point in the rebuilt plan; no privacy filter here.
+
+        The only privacy gate in the index path is admission into the plan
+        (``plan_rebuild``, issue #45) -- a point stored here already cleared
+        it, so there is nothing left to filter per query.
+        """
         plan = self._require_built()
-        require_public_filter(filter_privacy)
         limit = require_top_k(top_k)
         vector = require_query_vector(query_vector, dimension=plan.dimension)
         if not plan.points:

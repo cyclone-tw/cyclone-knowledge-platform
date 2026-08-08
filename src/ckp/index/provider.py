@@ -19,7 +19,6 @@ from ckp.index.models import (
     RebuildReport,
     SearchResult,
 )
-from ckp.privacy import PrivacyClass
 
 
 @runtime_checkable
@@ -39,6 +38,14 @@ class VectorIndexProvider(Protocol):
     4. ``snapshot``/``restore`` round-trip the exact point set; ``restore``
        re-verifies the payload digest before reporting success.
     5. No remote endpoint, credential, or model download, ever.
+    6. ``search`` performs no privacy filtering of its own (issue #45). The
+       only privacy gate in the index path is admission into the
+       ``RebuildPlan`` in ``plan_rebuild`` -- a point that reached this
+       provider has already cleared that gate, and every provider scores
+       every point in the rebuilt plan against every query. A provider must
+       not accept, validate, or otherwise imply a second privacy filter at
+       search time; that would claim a capability (query-time narrowing)
+       that does not exist here.
     """
 
     @property
@@ -51,7 +58,6 @@ class VectorIndexProvider(Protocol):
         query_vector: tuple[float, ...],
         *,
         top_k: int,
-        filter_privacy: frozenset[PrivacyClass],
     ) -> SearchResult: ...
 
     def snapshot(self, target_dir: Path) -> Path: ...

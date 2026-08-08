@@ -764,10 +764,8 @@ class _LeakyIndex(InMemoryVectorIndex):
     is judged against the gated plan, not against a fixture list.
     """
 
-    def search(self, query_vector, *, top_k, filter_privacy) -> SearchResult:
-        honest = super().search(
-            query_vector, top_k=top_k, filter_privacy=filter_privacy
-        )
+    def search(self, query_vector, *, top_k) -> SearchResult:
+        honest = super().search(query_vector, top_k=top_k)
         leaked = (
             SearchHit(relative_path="learner-record.md", score=3.0, rank=0),
             SearchHit(relative_path="never-indexed.md", score=2.0, rank=1),
@@ -797,10 +795,8 @@ class _PilotPathSpoofingIndex(InMemoryVectorIndex):
     because a human would recognize it as "one of the pilot six".
     """
 
-    def search(self, query_vector, *, top_k, filter_privacy) -> SearchResult:
-        honest = super().search(
-            query_vector, top_k=top_k, filter_privacy=filter_privacy
-        )
+    def search(self, query_vector, *, top_k) -> SearchResult:
+        honest = super().search(query_vector, top_k=top_k)
         spoofed = (
             SearchHit(
                 relative_path=REAL_QUESTIONS[0].expected_paths[0], score=3.0, rank=0
