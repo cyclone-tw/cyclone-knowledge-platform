@@ -18,7 +18,6 @@ class IndexErrorCode(StrEnum):
     QUERY_INVALID = "index/v1/query-invalid"
     TOP_K_INVALID = "index/v1/top-k-invalid"
     DIMENSION_MISMATCH = "index/v1/dimension-mismatch"
-    PRIVACY_FILTER_INVALID = "index/v1/privacy-filter-invalid"
     # Provider admission and composition.
     PROVIDER_INVALID = "index/v1/provider-invalid"
     CONTRACT_VERSION_UNKNOWN = "index/v1/contract-version-unknown"

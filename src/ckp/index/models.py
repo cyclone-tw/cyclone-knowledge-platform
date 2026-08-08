@@ -285,18 +285,6 @@ def require_top_k(value: object) -> int:
     return value
 
 
-def require_public_filter(value: object) -> frozenset[PrivacyClass]:
-    """The only admissible search filter is exactly ``{public}``.
-
-    The index never stores anything else, so any wider or different filter is
-    a caller expecting data this index must not have -- refuse rather than
-    silently narrow (AGENTS.md §8: do not pretend a capability exists).
-    """
-    if not isinstance(value, frozenset) or value != frozenset({PrivacyClass.PUBLIC}):
-        raise IndexRefusal(IndexErrorCode.PRIVACY_FILTER_INVALID)
-    return value
-
-
 def _note_text(decoded: str) -> str:
     """The embeddable text of a note: its body, without the frontmatter.
 
@@ -350,6 +338,18 @@ def plan_rebuild(
     configuration were somehow wrong, the same two-independent-signals
     pattern ``ckp.pilot.manifest`` already uses for ``type: Student
     Reference``.
+
+    This is the *only* privacy gate in the index path (issue #45). A
+    provider's ``search`` performs no per-point privacy check of its own --
+    ``IndexedPoint`` deliberately carries no privacy field, so there is
+    nothing left to filter against once a point has been admitted here.
+    Whatever is excluded from this plan never reaches a provider at all;
+    whatever is admitted is subject to every subsequent query with no second
+    gate downstream. A prior ``filter_privacy`` parameter on provider
+    ``search`` implied such a second gate existed; it did not (it was
+    validated and then ignored), which was actively misleading once #26
+    allowed an index to legitimately contain ``internal`` points -- so it
+    was removed rather than implemented, per the #45 decision.
     """
     if PrivacyClass.STUDENT_PRIVATE in admissible:
         raise IndexRefusal(IndexErrorCode.PLAN_INVALID)
@@ -539,7 +539,6 @@ __all__ = [
     "plan_rebuild",
     "read_plan_snapshot",
     "require_sealed_plan",
-    "require_public_filter",
     "require_query_vector",
     "require_top_k",
     "write_plan_snapshot",

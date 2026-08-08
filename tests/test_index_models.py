@@ -15,7 +15,6 @@ from ckp.index.models import (
     compute_payload_digest,
     compute_point_id,
     plan_rebuild,
-    require_public_filter,
     require_query_vector,
     require_top_k,
 )
@@ -173,17 +172,6 @@ def test_input_guards_fail_closed() -> None:
         with pytest.raises(IndexRefusal) as caught:
             require_top_k(bad)
         assert caught.value.code is IndexErrorCode.TOP_K_INVALID
-
-    for bad_filter in (
-        frozenset(),
-        frozenset({PrivacyClass.PUBLIC, PrivacyClass.INTERNAL}),
-        frozenset({PrivacyClass.INTERNAL}),
-        {PrivacyClass.PUBLIC},
-        "public",
-    ):
-        with pytest.raises(IndexRefusal) as caught:
-            require_public_filter(bad_filter)
-        assert caught.value.code is IndexErrorCode.PRIVACY_FILTER_INVALID
 
 
 def test_plan_rebuild_orders_gates_and_counts() -> None:
