@@ -11,9 +11,11 @@ provenance 那組" scopes the *relative* comparisons: the synthetic corpus is
 questions this implementation wrote to be found, and grading a comparison
 against its own self-authored answer key is not evidence of anything. The
 relative dimensions with per-provenance data (``answerable_hit_rate``,
-``context_token_total``) therefore read ``report["summary"]["provenance"]
-["real"]`` (or, for the QMD side -- see next paragraph -- a real-only slice
-recomputed from ``report["questions"]``), never ``["synthetic"]``. The
+``context_token_total``) therefore read real-provenance data only --
+``report["summary"]["provenance"]["real"]``, or a real-only slice recomputed
+from ``report["questions"]`` (the QMD side -- see next paragraph -- and,
+since Epic #21's D1 clarification implemented in #62,
+``context_token_total``'s same-work subset) -- never ``["synthetic"]``. The
 *absolute* dimensions (``citation_correctness``, ``privacy_false_negative``)
 judge the whole run, pooled across both provenances (Codex round 1 on #30):
 a citation bound to the wrong commit, or a leaked non-public path, is the
@@ -116,7 +118,7 @@ from ckp.privacy.gate import PrivacyGate
 # function that needs it means it never can, even if that changes later,
 # with no dependency on remembering why.
 
-GATE_SCHEMA = "ckp-gate-report/1"
+GATE_SCHEMA = "ckp-gate-report/2"
 
 #: D3 frozen: the named index, never the flagless default mirror. A literal
 #: index *name* is not a host path (AGENTS.md §7 governs paths/hosts, not
@@ -336,36 +338,104 @@ def _gate_answerable_hit_rate(report: dict, qmd_stats: dict) -> dict[str, Any]:
 
 
 def _gate_context_token_total(report: dict, qmd_stats: dict) -> dict[str, Any]:
+    """D1's token comparison, on the same-work subset (Epic #21, issue #62).
+
+    The comparison runs only over the real questions the QMD baseline
+    itself hit. Pooling every real question structurally rewarded a
+    baseline miss: a question QMD could not answer contributed 0 to its
+    total while the platform, which answered it, paid full price -- a
+    threshold that punishes answering (#62's arithmetic; same family as
+    #58's degenerate-baseline rule: work the baseline never did must not
+    count in its favor). The direction and value of the threshold are
+    unchanged (platform total <= QMD total); only *which questions* enter
+    the totals was clarified, by Cyclone's D1-clarification on Epic #21.
+
+    The pre-clarification pooled numbers stay in ``detail``, explicitly
+    informational, so a reader comparing this gate result against an older
+    one sees the method change instead of inferring it from moved numbers.
+    """
     real = report["summary"]["provenance"]["real"]
-    lexical_total = real["lexical_token_cost_total"]
-    lexical_unmeasured = real["lexical_token_cost_unmeasured_questions"]
-    qmd_total = qmd_stats["token_cost_total"]
-    qmd_unmeasured = qmd_stats["token_cost_unmeasured_questions"]
+    pooled_lexical_total = real["lexical_token_cost_total"]
+    pooled_lexical_unmeasured = real["lexical_token_cost_unmeasured_questions"]
+    pooled_qmd_total = qmd_stats["token_cost_total"]
+    pooled_qmd_unmeasured = qmd_stats["token_cost_unmeasured_questions"]
+
+    subset = [
+        question
+        for question in _real_questions(report)
+        if question["qmd"] is not None and question["qmd"]["hit"]
+    ]
+    lexical_costs = [question["lexical"]["token_cost"] for question in subset]
+    qmd_costs = [question["qmd"]["token_cost"] for question in subset]
+    lexical_unmeasured = sum(1 for cost in lexical_costs if cost is None)
+    qmd_unmeasured = sum(1 for cost in qmd_costs if cost is None)
+    lexical_total = sum(cost for cost in lexical_costs if cost is not None)
+    qmd_total = sum(cost for cost in qmd_costs if cost is not None)
+
     detail = {
-        "platform_lexical_token_cost_total": lexical_total,
-        "platform_lexical_token_cost_unmeasured_questions": lexical_unmeasured,
+        "compared_on": (
+            "real questions the QMD baseline itself hit -- same-work "
+            "comparison per Epic #21's D1 clarification (#62)"
+        ),
+        "compared_question_ids": [q["question_id"] for q in subset],
+        "platform_lexical_token_cost_total_on_subset": lexical_total,
+        "platform_lexical_token_cost_unmeasured_questions_on_subset": (
+            lexical_unmeasured
+        ),
+        "qmd_token_cost_total_on_subset": qmd_total,
+        "qmd_token_cost_unmeasured_questions_on_subset": qmd_unmeasured,
+        "pooled_platform_lexical_token_cost_total_informational": (
+            pooled_lexical_total
+        ),
+        "pooled_platform_lexical_token_cost_unmeasured_questions_informational": (
+            pooled_lexical_unmeasured
+        ),
+        "pooled_qmd_token_cost_total_informational": pooled_qmd_total,
+        "pooled_qmd_token_cost_unmeasured_questions_informational": (
+            pooled_qmd_unmeasured
+        ),
         "platform_vector_token_cost_total_informational": real[
             "vector_token_cost_total"
         ],
-        "qmd_real_token_cost_total": qmd_total,
-        "qmd_real_token_cost_unmeasured_questions": qmd_unmeasured,
     }
-    if not report["qmd_compared"] or lexical_unmeasured > 0 or qmd_unmeasured > 0:
+    if not report["qmd_compared"]:
+        return _item(
+            "context_token_total",
+            RELATIVE,
+            STATUS_NOT_EVALUABLE,
+            detail=detail,
+            reason="there is no QMD baseline at all",
+        )
+    if not subset:
+        # Defense in depth: evaluate_gate's degenerate-baseline rule (#58)
+        # already intercepts a zero-hit baseline before this dimension
+        # runs, but this function must stay honest when called directly --
+        # an empty same-work subset compares nothing and must never pass.
+        return _item(
+            "context_token_total",
+            RELATIVE,
+            STATUS_NOT_EVALUABLE,
+            detail=detail,
+            reason="the QMD baseline hit no real question, so the "
+            "same-work subset is empty and there is nothing to compare",
+        )
+    if lexical_unmeasured > 0 or qmd_unmeasured > 0:
         return _item(
             "context_token_total",
             RELATIVE,
             STATUS_NOT_EVALUABLE,
             detail=detail,
             reason="a residual (partial) total must never be compared -- "
-            "either side has at least one unmeasured question, or there is "
-            "no QMD baseline at all",
+            "at least one same-work-subset question has an unmeasured "
+            "token cost on one side",
         )
     status = STATUS_PASS if lexical_total <= qmd_total else STATUS_FAIL
     reason = (
         None
         if status == STATUS_PASS
         else f"platform lexical token total {lexical_total} exceeds the QMD "
-        f"real-provenance baseline {qmd_total}"
+        f"baseline {qmd_total} on the same-work subset (the "
+        f"{len(subset)} real questions QMD itself hit)"
     )
     return _item("context_token_total", RELATIVE, status, detail=detail, reason=reason)
 

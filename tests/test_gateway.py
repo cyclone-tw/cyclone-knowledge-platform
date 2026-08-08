@@ -84,8 +84,14 @@ def test_catalog_rejects_caller_owned_privacy_policy_parameters(
 
 def test_query_is_lexical_deterministic_bounded_and_cited(tmp_path: Path) -> None:
     long_body = "before " + ("x" * 400) + " kettle " + ("y" * 400)
-    write_note(tmp_path, "b.md", title="Kettle title", body=long_body)
-    write_note(tmp_path, "a.md", title="Other", body="A kettle in body.")
+    write_note(
+        tmp_path,
+        "b.md",
+        title="Kettle title",
+        description="The kettle reference.",
+        body=long_body,
+    )
+    write_note(tmp_path, "a.md", title="Other kettle", body="Nothing else here.")
     client = _client(tmp_path)
 
     first = client.post("/query", json={"query": "KETTLE", "limit": 20})
@@ -110,9 +116,100 @@ def test_query_is_lexical_deterministic_bounded_and_cited(tmp_path: Path) -> Non
     )
 
 
+def test_query_cutoff_drops_weak_matches_and_counts_only_survivors(
+    tmp_path: Path,
+) -> None:
+    """Issue #62, direction one: weak associations are cut, not served.
+
+    ``partial.md`` scores above the absolute floor but below 2/3 of the top
+    score (ratio bar); ``tagalong.md`` is a single generic body-token match
+    (score 1, floor bar). Neither may be served, and ``total`` must count
+    survivors only -- the pre-#62 behavior served all three and reported
+    ``total == 3``.
+    """
+    write_note(
+        tmp_path,
+        "target.md",
+        title="Umbra logistics manifest",
+        body="Umbra logistics manifest, expanded.",
+    )
+    write_note(tmp_path, "partial.md", title="Logistics", body="Umbra appears once.")
+    write_note(tmp_path, "tagalong.md", title="Unrelated", body="Mentions logistics.")
+
+    response = _client(tmp_path).post(
+        "/query", json={"query": "umbra logistics manifest"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["concept_id"] for item in body["results"]] == ["target"]
+    assert body["total"] == 1
+
+
+def test_query_cutoff_keeps_multi_target_boundary_ties(tmp_path: Path) -> None:
+    """Issue #62, direction two: a multi-target answer set is not over-cut.
+
+    The measured distribution's binding case (q06) has the second expected
+    note at exactly 2/3 of the top score; the cutoff comparison must be
+    ``>=`` in integers so this boundary result is served, while the score-1
+    tail is still cut.
+    """
+    write_note(tmp_path, "first.md", title="Unrelated A", body="tide caves mapping")
+    write_note(tmp_path, "second.md", title="Unrelated B", body="tide caves")
+    write_note(tmp_path, "junk.md", title="Unrelated C", body="mapping alone")
+
+    response = _client(tmp_path).post("/query", json={"query": "tide caves mapping"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["concept_id"] for item in body["results"]] == ["first", "second"]
+    assert body["total"] == 2
+
+
+def test_query_all_weak_matches_serve_nothing(tmp_path: Path) -> None:
+    """Issue #62: the floor holds even when every match is weak.
+
+    Both notes match one generic token in the body (score 1) and the top
+    score is itself 1, so the ratio bar alone would keep everything; only
+    the absolute floor says a page of single-token matches is not an
+    answer. Empty is the honest response (same doctrine as q10's empty
+    no-answer question).
+    """
+    write_note(tmp_path, "noise1.md", title="Alpha", body="sentinel word")
+    write_note(tmp_path, "noise2.md", title="Beta", body="sentinel again")
+
+    response = _client(tmp_path).post("/query", json={"query": "sentinel missingword"})
+
+    assert response.status_code == 200
+    assert response.json()["results"] == []
+    assert response.json()["total"] == 0
+
+
+def test_query_single_token_body_match_stays_servable(tmp_path: Path) -> None:
+    """Issue #62: the floor is capped at the query's own token count.
+
+    For a one-token query, a body-only match covers everything the caller
+    asked; the multi-token floor evidence ("score 1 is a generic tag-along")
+    does not apply and the result must still be served.
+    """
+    write_note(tmp_path, "only.md", title="Unrelated", body="A quokka sighting.")
+
+    response = _client(tmp_path).post("/query", json={"query": "quokka"})
+
+    assert response.status_code == 200
+    assert [item["concept_id"] for item in response.json()["results"]] == ["only"]
+    assert response.json()["total"] == 1
+
+
 def test_snippet_offset_tracks_casefold_expansion(tmp_path: Path) -> None:
     body = ("ß" * 400) + " needle " + ("z" * 400)
-    write_note(tmp_path, "public.md", title="Expansion", body=body)
+    write_note(
+        tmp_path,
+        "public.md",
+        title="Expansion",
+        description="Where the needle hides.",
+        body=body,
+    )
 
     response = _client(tmp_path).post("/query", json={"query": "needle"})
 
