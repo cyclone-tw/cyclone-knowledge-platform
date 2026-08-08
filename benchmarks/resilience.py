@@ -16,19 +16,20 @@ answers a yes/no question with evidence, never a "probably falls back":
   ``ckp/app.py`` frames a 200 with null fields as the honest answer to "what
   exactly is being served" (a metadata surface), with ``/health`` as the
   separate "am I serving" signal this scenario checks instead.
-* **Stale snapshot** (:func:`check_stale_snapshot`): a vector index built
-  from one bundle content is still being served after the bundle changed
-  underneath it. Contract §5.5 names "Dashboard shows a revision mismatch
-  without flagging it stale" as a rollback trigger. **This dimension cannot
-  report a production pass.** Nothing in ``src/ckp`` compares a served
-  revision against a live recomputation and flags a mismatch -- that
-  capability does not exist yet (tracked as #39). What this scenario
-  verifies is only that *if* such a comparison existed with the shape this
-  benchmark proposes, it would correctly distinguish "unedited" from
-  "edited-since-build" -- reported as ``benchmark_comparison_passed``,
-  never as ``passed``. ``passed`` for this scenario is hardcoded ``False``
-  and stays that way until #39 lands a real production detection path; see
-  "Findings" below.
+* **Stale snapshot** (:func:`check_stale_snapshot`): a bundle changes on
+  disk after a request has already been served from it. Contract §5.5 names
+  "Dashboard shows a revision mismatch without flagging it stale" as a
+  rollback trigger. As of #39, ``GET /revision`` (``ckp/app.py``) flags
+  exactly this: it compares the snapshot other routes were just serving
+  (``SnapshotCache.peek()``, no filesystem probe) against a fresh
+  recomputation from the bundle root, and reports the mismatch as
+  ``"stale": true``. This scenario drives the real FastAPI app -- not a
+  benchmark-only comparator -- through the sequence unedited-call,
+  edit-on-disk, next-call, next-call-again, and asserts the flag is
+  ``False``, ``False``, ``True``, ``False`` in that order (the last ``False``
+  because ``/revision``'s own call already re-verified and healed the
+  cache). See "Findings" below for what changed from the pre-#39 version of
+  this module.
 * **MacBook offline** (:func:`check_offline_scope_fail_closed`): C6's
   :class:`~ckp.gateway.scoped.OfflineQmdScope` is the permission projection
   meant to run disconnected. This dimension checks it stays fail-closed --
@@ -48,24 +49,26 @@ not add new fallback logic to ``src/ckp``. Where a scenario's assertion
 would require behavior the platform does not yet have, that gap belongs in
 a new issue, not a silent patch here -- see "Findings" below.
 
-Findings from building this benchmark (reported, not fixed here):
+Findings from building this benchmark, and how #39 changed it:
 
-* No module in ``src/ckp`` currently compares a served/composed index
-  revision against a fresh recomputation from the live bundle and flags a
-  mismatch as stale. :func:`_is_snapshot_stale` is this benchmark's own
-  comparison, not a production code path. Contract §5.5 lists "revision
-  mismatch shown without a stale flag" as a rollback trigger for Phase 5;
-  today there is no production stale flag to fail. Tracked as **#39**; the
-  report's ``stale_snapshot.passed`` field stays ``False`` and
-  ``production_detection`` stays ``"not-implemented"`` until #39 lands a
-  real production detection path -- a reader of the report must never be
-  able to mistake a correct benchmark comparator for a production
-  capability that does not exist (Codex Round 1 review, #27).
+* Before #39, no module in ``src/ckp`` compared a served revision against a
+  fresh recomputation from the live bundle and flagged a mismatch as stale.
+  This module carried its own ``_is_snapshot_stale`` comparator so the
+  dimension could be observed at all, and ``stale_snapshot.passed`` was
+  hardcoded ``False`` -- correct behavior in a benchmark-only comparator
+  must never be presented as a production capability that does not exist
+  (Codex Round 1 review, #27).
+* #39 added that comparison to production: ``GET /revision`` now flags
+  ``stale`` by comparing ``SnapshotCache.peek()`` (what was just served)
+  against a fresh recomputation. This module's own comparator is gone --
+  the whole reason it existed was that production had no equivalent path.
+  ``check_stale_snapshot`` now drives the real endpoint through an
+  edit-on-disk sequence instead, and ``stale_snapshot.passed`` reflects
+  what that endpoint actually did, not a hardcoded value.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import tempfile
 from collections.abc import Callable
@@ -89,12 +92,8 @@ from ckp.auth import (
     KnowledgeDomain,
     ScopeGrant,
 )
-from ckp.bundle import BundleMember, compute_index_revision_from_members
 from ckp.config import load_config
-from ckp.embedding.composition import build_c4_deterministic_stack
-from ckp.index.memory import InMemoryVectorIndex
-from ckp.index.models import plan_rebuild
-from ckp.privacy import FrontmatterClassifier, PrivacyClass, PrivacyGate
+from ckp.privacy import PrivacyClass
 
 REPORT_SCHEMA = "ckp-resilience-report/1"
 
@@ -110,6 +109,7 @@ _BUNDLE_COMMIT = "b" * 40
 
 _FINANCE_ID = "00000000-0000-7000-8000-0000000000a1"
 _CALENDAR_ID = "00000000-0000-7000-8000-0000000000a2"
+_STALE_NOTE_ID = "00000000-0000-7000-8000-0000000000b1"
 
 
 @dataclass(frozen=True)
@@ -149,18 +149,6 @@ def _write_note(
             ]
         ),
         encoding="utf-8",
-    )
-
-
-def _member(relative_path: str, body: str) -> BundleMember:
-    content = "\n".join(
-        ["---", "privacy: public", "title: Resilience fixture", "---", "", body, ""]
-    ).encode("utf-8")
-    return BundleMember(
-        relative_path=relative_path,
-        digest_key=relative_path,
-        content=content,
-        content_sha256=hashlib.sha256(content).hexdigest(),
     )
 
 
@@ -331,103 +319,91 @@ def probe_gateway_down() -> ScenarioOutcome:
 # --------------------------------------------------------------------------
 
 
-def _is_snapshot_stale(
-    served_bundle_index_revision: str, live_bundle_index_revision: str | None
-) -> bool:
-    """The one comparison this benchmark treats as the stale signal.
-
-    AGENTS.md §8: a derived revision that cannot be recomputed from its
-    commit is itself a rollback trigger, so an unreadable live bundle
-    (``None``) counts as stale rather than as "cannot tell" -- the caller
-    must never read "unknown" as "current".
-    """
-    if live_bundle_index_revision is None:
-        return True
-    return served_bundle_index_revision != live_bundle_index_revision
-
-
-#: Production has no revision-staleness comparison at all (see the module
-#: docstring's Findings note, tracked as #39). Naming the literal here means
-#: a caller reading the report sees the same fixed string every time, and
-#: the mutation test can pin its exact value rather than "any non-empty
-#: string that isn't the ok case".
-PRODUCTION_STALE_DETECTION_STATUS = "not-implemented"
+#: Production now has a real revision-staleness comparison (#39):
+#: ``GET /revision`` in ``ckp/app.py`` compares ``SnapshotCache.peek()``
+#: against a fresh recomputation and reports the mismatch as
+#: ``"stale": true``. Naming the literal here means a caller reading the
+#: report sees the same fixed string every time, and the mutation test can
+#: pin its exact value rather than "any non-empty string that isn't the gap
+#: case".
+PRODUCTION_STALE_DETECTION_STATUS = "implemented"
 
 
 def check_stale_snapshot() -> ScenarioOutcome:
-    """A vector index built at one bundle content, served after an edit.
+    """Drive the real ``/revision`` endpoint through an edit-on-disk sequence.
 
-    ``plan_rebuild`` folds the bundle's content into
-    ``plan.bundle_index_revision`` at build time (``src/ckp/index/models.py``).
-    Nothing in this repo re-checks that binding against the *current* bundle
-    on every serve -- this scenario builds that missing comparison as a
-    benchmark-only dimension and asserts it actually distinguishes
-    "unedited" from "edited-since-build" (``benchmark_comparison_passed``).
+    This is deliberately end to end: a real bundle directory, a real
+    ``create_app`` instance, real HTTP calls through ``TestClient`` -- no
+    benchmark-only comparator standing in for production. The sequence:
 
-    That correctness is reported separately from ``passed``. ``passed`` is
-    hardcoded ``False`` here: a benchmark comparator behaving correctly must
-    never be presented as "stale snapshot: passed" when production has no
-    such comparison to actually run (Codex Round 1 review, #27; production
-    gap tracked as #39). Only a real detection path landing in ``src/ckp``
-    may ever flip this scenario's ``passed`` to ``True``.
+    1. First call ever made to this app: nothing was served before it, so
+       ``SnapshotCache.peek()`` is ``None`` and ``stale`` must read
+       ``False`` -- "nothing served yet" is not evidence of drift, and must
+       never be misread as "stale" the way an unreadable live bundle would
+       be (AGENTS.md §8 governs that distinct case, not this one).
+    2. A second call with nothing changed on disk: negative control, must
+       stay ``False``.
+    3. The bundle is edited on disk. A third call must read ``True`` --
+       the snapshot the second call served no longer matches a fresh
+       recomputation.
+    4. A fourth call, still after the edit: ``/revision`` always
+       re-verifies before answering (contract: ``test_app.py::
+       test_revision_is_recomputed_per_request``), so this call already
+       observed and healed the drift while producing call 3's answer --
+       the flag must have dropped back to ``False``.
     """
-    stack = build_c4_deterministic_stack(
-        dimension=8,
-        embedding_name="resilience-hash",
-        reranker_name="resilience-cosine",
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "bundle"
+        root.mkdir(parents=True)
+        _write_note(
+            root,
+            "resilience-note.md",
+            privacy="public",
+            note_id=_STALE_NOTE_ID,
+            body="alpha content before the edit",
+        )
+        config = load_config(env={"CKP_BUNDLE_ROOT": str(root)})
+        client = TestClient(create_app(config))
+
+        first_call = client.get("/revision").json()
+        unedited_call = client.get("/revision").json()
+
+        _write_note(
+            root,
+            "resilience-note.md",
+            privacy="public",
+            note_id=_STALE_NOTE_ID,
+            body="alpha content after the edit",
+        )
+        after_edit_call = client.get("/revision").json()
+        healed_call = client.get("/revision").json()
+
+    passed = (
+        first_call["stale"] is False
+        and unedited_call["stale"] is False
+        and after_edit_call["stale"] is True
+        and healed_call["stale"] is False
+        and after_edit_call["index_revision"] != unedited_call["index_revision"]
     )
-    # ``classify_member`` never touches the filesystem (it classifies bytes
-    # already captured in a BundleMember), so the classifier's bundle_root
-    # is unused for this in-memory scenario.
-    classifier = FrontmatterClassifier(Path("unused-by-classify-member"))
-    gate = PrivacyGate(classifier, frozenset({PrivacyClass.PUBLIC}))
-
-    built_members = (_member("resilience-note.md", "alpha content before the edit"),)
-    plan = plan_rebuild(members=built_members, stack=stack, gate=gate)
-    provider = InMemoryVectorIndex()
-    provider.rebuild(plan)
-
-    # Negative control: nothing changed -- must NOT be flagged stale.
-    unedited_live_revision = compute_index_revision_from_members(built_members)
-    flagged_when_unedited = _is_snapshot_stale(
-        plan.bundle_index_revision, unedited_live_revision
-    )
-
-    # Positive case: the Wiki changed after the index was last built and
-    # nobody rebuilt it -- the realistic §5.3 disconnected/stale scenario.
-    edited_members = (_member("resilience-note.md", "alpha content after the edit"),)
-    edited_live_revision = compute_index_revision_from_members(edited_members)
-    flagged_after_edit = _is_snapshot_stale(
-        plan.bundle_index_revision, edited_live_revision
-    )
-
-    benchmark_comparison_passed = (flagged_when_unedited is False) and (
-        flagged_after_edit is True
-    )
-
-    # `passed` is deliberately NOT `benchmark_comparison_passed`. See the
-    # function docstring and PRODUCTION_STALE_DETECTION_STATUS: production
-    # has no stale-detection code path, so this scenario can never honestly
-    # report a pass, no matter how correct the benchmark-only comparator is.
-    passed = False
 
     return ScenarioOutcome(
         scenario="stale_snapshot",
         passed=passed,
         assertion=(
-            "production must flag a bundle_index_revision mismatch as "
-            "stale; it has no such comparison today (#39), so this "
-            "scenario reports passed=false regardless of "
-            "benchmark_comparison_passed -- see production_detection"
+            "GET /revision flags stale=true exactly on the first call after "
+            "the bundle changed underneath a previously-served snapshot, "
+            "and stale=false before the edit, immediately after it heals on "
+            "the next call, and on the very first call an app ever serves "
+            "-- exercised against the real FastAPI app (#39), not a "
+            "benchmark-only comparator"
         ),
         observed={
-            "served_composed_revision": plan.composed_revision,
-            "served_bundle_index_revision": plan.bundle_index_revision,
-            "live_bundle_index_revision_unedited": unedited_live_revision,
-            "live_bundle_index_revision_after_edit": edited_live_revision,
-            "flagged_stale_when_unedited": flagged_when_unedited,
-            "flagged_stale_after_edit": flagged_after_edit,
-            "benchmark_comparison_passed": benchmark_comparison_passed,
+            "first_call_stale": first_call["stale"],
+            "unedited_call_stale": unedited_call["stale"],
+            "after_edit_call_stale": after_edit_call["stale"],
+            "healed_call_stale": healed_call["stale"],
+            "index_revision_before_edit": unedited_call["index_revision"],
+            "index_revision_after_edit": after_edit_call["index_revision"],
             "production_detection": PRODUCTION_STALE_DETECTION_STATUS,
         },
     )
@@ -560,12 +536,9 @@ def run_resilience_benchmark() -> dict:
     the same Phase 4 report bundle.
 
     ``all_passed`` is a plain ``all(...)`` over every scenario's ``passed``
-    field, including ``stale_snapshot``'s -- which is hardcoded ``False``
-    until #39 lands a real production detection path (see
-    :func:`check_stale_snapshot`). That means ``all_passed`` cannot become
-    ``True`` on a correct benchmark comparator alone; a reader who only
-    checks ``all_passed`` still cannot be misled into thinking Phase 4's
-    stale-snapshot dimension is production-ready.
+    field. As of #39, ``stale_snapshot.passed`` is a real measurement of
+    ``GET /revision`` (see :func:`check_stale_snapshot`), not a hardcoded
+    value, so ``all_passed`` can now legitimately reach ``True``.
     """
     outcomes = (
         probe_gateway_down(),

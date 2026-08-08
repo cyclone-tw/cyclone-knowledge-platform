@@ -181,6 +181,67 @@ def test_revision_is_recomputed_per_request(tmp_path) -> None:
     assert after == compute_index_revision(bundle, "**/*.md")
 
 
+# --- #39: /revision flags staleness against a previously served snapshot --
+
+
+def test_revision_stale_is_false_on_the_first_call_an_app_ever_serves(
+    tmp_path,
+) -> None:
+    """Nothing was served before the first call, so there is nothing to
+    have drifted from -- 'never served' must not be misread as 'stale'."""
+    bundle = tmp_path / "live"
+    bundle.mkdir()
+    (bundle / "a.md").write_bytes(b"first\n")
+    client = TestClient(create_app(load_config(env={"CKP_BUNDLE_ROOT": str(bundle)})))
+
+    assert client.get("/revision").json()["stale"] is False
+
+
+def test_revision_stale_stays_false_with_no_intervening_edit(tmp_path) -> None:
+    bundle = tmp_path / "live"
+    bundle.mkdir()
+    (bundle / "a.md").write_bytes(b"first\n")
+    client = TestClient(create_app(load_config(env={"CKP_BUNDLE_ROOT": str(bundle)})))
+
+    client.get("/revision")
+    assert client.get("/revision").json()["stale"] is False
+
+
+def test_revision_flags_stale_after_the_bundle_changes_underneath_it(
+    tmp_path,
+) -> None:
+    """Contract §5.5's rollback trigger, made observable: a revision
+    mismatch must show up as an explicit stale=true, not silently."""
+    bundle = tmp_path / "live"
+    bundle.mkdir()
+    (bundle / "a.md").write_bytes(b"first\n")
+    client = TestClient(create_app(load_config(env={"CKP_BUNDLE_ROOT": str(bundle)})))
+
+    client.get("/revision")  # materializes the cache's first snapshot
+    (bundle / "a.md").write_bytes(b"second\n")
+
+    stale_response = client.get("/revision").json()
+    assert stale_response["stale"] is True
+    # The field this request reports is still the fresh, correct value --
+    # staleness is signaled by the flag, not by serving old data.
+    assert stale_response["index_revision"] == compute_index_revision(bundle, "**/*.md")
+
+
+def test_revision_stale_flag_self_heals_on_the_next_call(tmp_path) -> None:
+    """Contract §5.5 asks for the mismatch to be *flagged*, not for the
+    service to keep refusing -- the very next call, with nothing further
+    changed, must read stale=false again."""
+    bundle = tmp_path / "live"
+    bundle.mkdir()
+    (bundle / "a.md").write_bytes(b"first\n")
+    client = TestClient(create_app(load_config(env={"CKP_BUNDLE_ROOT": str(bundle)})))
+
+    client.get("/revision")
+    (bundle / "a.md").write_bytes(b"second\n")
+    assert client.get("/revision").json()["stale"] is True
+    assert client.get("/revision").json()["stale"] is False
+
+
 def test_health_is_degraded_when_a_note_cannot_be_read(tmp_path) -> None:
     """End to end for the listable-but-unreadable case."""
     import os

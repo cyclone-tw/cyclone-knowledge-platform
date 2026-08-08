@@ -432,4 +432,35 @@ expect_red \
   "changed bundle bytes return a stale cached revision" \
   tests/test_revision_cache.py::test_changed_bytes_are_revalidated_without_a_stale_revision
 
+echo "==> production staleness flag mutations (#39)"
+new_case
+replace_once \
+  "src/ckp/app.py" \
+'        stale = (
+            served_before is not None
+            and served_before.index_revision != current.index_revision
+        )' \
+'        stale = False'
+expect_red \
+  "production stale flag removed -- resilience benchmark must not fall back to a self-comparator" \
+  tests/test_app.py::test_revision_flags_stale_after_the_bundle_changes_underneath_it \
+  tests/test_resilience_benchmark.py::test_stale_snapshot_scenario_passes_against_the_real_endpoint
+
+new_case
+replace_once \
+  "src/ckp/bundle.py" \
+'        Returns ``None`` before the first ``get`` call on this instance.
+        """
+        with self._lock:
+            return self._snapshot' \
+'        Returns ``None`` before the first ``get`` call on this instance.
+        """
+        with self._lock:
+            return None'
+expect_red \
+  "SnapshotCache.peek() always reports nothing was ever served" \
+  tests/test_revision_cache.py::test_peek_returns_the_last_snapshot_get_materialized \
+  tests/test_app.py::test_revision_flags_stale_after_the_bundle_changes_underneath_it \
+  tests/test_resilience_benchmark.py::test_stale_snapshot_scenario_passes_against_the_real_endpoint
+
 echo "mutation: control plus $((CASE_NUMBER - 1)) C3 mutants all turned red"
