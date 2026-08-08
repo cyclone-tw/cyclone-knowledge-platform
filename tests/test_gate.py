@@ -435,15 +435,36 @@ def test_real_group_success_is_not_dragged_down_by_a_bad_synthetic_group() -> No
 # --- not_evaluable is a real third state, never silently "pass" ------------
 
 
-def test_missing_real_provenance_questions_is_not_evaluable_not_pass() -> None:
+def test_no_scored_questions_is_not_evaluable_not_pass() -> None:
+    """Round 1 made the absolute dimensions pooled; the empty-run guard moves
+    with them -- a run that scored nothing has no citations to be correct."""
     report = base_report()
     report["summary"]["provenance"]["real"]["question_count"] = 0
-    report["summary"]["provenance"]["real"]["citation_correct_questions"] = 0
+    report["summary"]["provenance"]["synthetic"]["question_count"] = 0
+    report["summary"]["citation_correct_questions"] = 0
     result = gate.evaluate_gate(report)
     item = _item(result, "citation_correctness")
     assert item["status"] == "not_evaluable"
-    assert item["status"] != "pass"
     assert "citation_correctness" in result["not_evaluable_dimensions"]
+
+
+def test_synthetic_citation_error_fails_the_absolute_gate() -> None:
+    """Codex round 1: absolutes are run-wide. A citation bound to the wrong
+    commit on a synthetic question is the same engine bug as on a real one;
+    real-group scoping governs relative thresholds only."""
+    report = base_report()
+    report["summary"]["citation_correct_questions"] -= 1
+    result = gate.evaluate_gate(report)
+    assert _item(result, "citation_correctness")["status"] == "fail"
+
+
+def test_synthetic_privacy_leak_fails_the_absolute_gate() -> None:
+    """RP2 zero tolerance is run-wide: a leak on a synthetic question is
+    still a leak by the engine under test."""
+    report = base_report()
+    report["summary"]["privacy_false_negatives"] = 1
+    result = gate.evaluate_gate(report)
+    assert _item(result, "privacy_false_negative")["status"] == "fail"
 
 
 def test_stale_exclusion_is_always_not_evaluable_never_silently_pass() -> None:
@@ -546,13 +567,21 @@ def test_latency_over_2x_qmd_baseline_fails() -> None:
     assert "lexical" in item["reason"]
 
 
-def test_latency_checks_vector_too() -> None:
+def test_latency_verdict_reads_lexical_only_vector_is_informational() -> None:
+    """RP3 (Codex round 1): a slow vector engine must not fail the gate --
+    under the hash baseline it decides nothing. The number stays visible in
+    detail; the verdict comes from lexical alone."""
     result = gate.evaluate_gate(
         base_report(lexical_p95=100.0, vector_p95=200.0, qmd_p95=60.0)
     )
     item = _item(result, "latency_p95")
-    assert item["status"] == "fail"
-    assert "vector" in item["reason"]
+    assert item["status"] == "pass"
+    assert item["detail"]["platform_vector_p95_ms"] == 200.0
+
+    slow_lexical = gate.evaluate_gate(
+        base_report(lexical_p95=200.0, vector_p95=50.0, qmd_p95=60.0)
+    )
+    assert _item(slow_lexical, "latency_p95")["status"] == "fail"
 
 
 def test_latency_not_evaluable_when_qmd_not_compared() -> None:
@@ -746,3 +775,32 @@ def test_degenerate_qmd_baseline_fails_and_voids_every_relative_dimension():
         if item["status"] == "not_evaluable" and item["dimension"] != "stale_exclusion"
     ]
     assert all("degenerate" in reason for reason in reasons)
+
+
+def test_gate_env_switches_are_reserved_in_config():
+    """Codex round 1 on #30: `main()` calls `load_config()` over the real
+    environment before reading `CKP_QMD_BINARY` -- the exact #46 landmine
+    reborn in new code. Both gate harness switches must be reserved, or a
+    caller exporting them cannot run the runner at all."""
+    from ckp.config import RESERVED_ENV, load_config
+
+    assert "CKP_QMD_BINARY" in RESERVED_ENV
+    assert "CKP_REQUIRE_GATE_E2E" in RESERVED_ENV
+    # The behavioural half: loading config with the switch set must not raise.
+    load_config(env={"CKP_QMD_BINARY": "/opt/custom/qmd"})
+    load_config(env={"CKP_REQUIRE_GATE_E2E": "1"})
+
+
+def test_citation_denominator_is_every_question_not_only_scored():
+    """The live run that caught this: 16 questions, 13 scored, 16 correct →
+    "-3/13 incorrect" under a scored-only denominator. Correctness is tallied
+    over every question, so the denominator must be too."""
+    report = base_report()
+    real_n = report["summary"]["provenance"]["real"]["question_count"]
+    syn_n = report["summary"]["provenance"]["synthetic"]["question_count"]
+    report["summary"]["scored_questions"] = real_n + syn_n - 1  # one no-answer
+    report["summary"]["citation_correct_questions"] = real_n + syn_n
+    result = gate.evaluate_gate(report)
+    item = _item(result, "citation_correctness")
+    assert item["status"] == "pass", item
+    assert item["detail"]["total_questions"] == real_n + syn_n

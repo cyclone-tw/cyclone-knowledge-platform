@@ -199,24 +199,42 @@ def _real_qmd_stats(report: dict) -> dict[str, Any]:
 
 
 def _gate_citation_correctness(report: dict) -> dict[str, Any]:
-    real = report["summary"]["provenance"]["real"]
-    total = real["question_count"]
-    correct = real["citation_correct_questions"]
-    detail = {"correct_questions": correct, "total_questions": total}
+    # Absolute dimensions judge the whole run (Codex round 1): a citation
+    # bound to the wrong commit on a synthetic question is the same
+    # correctness bug as on a real one, and "apply thresholds to the real
+    # group" (D1 ruling) scopes the *relative* comparisons -- self-
+    # certification is a relative-threshold disease, not an absolute one.
+    # Denominator is every question, not just the scored ones:
+    # `citation_correct_questions` is tallied over the whole run (a no-answer
+    # question still binds its citations), while `scored_questions` counts
+    # only those with expected paths -- mixing the two produced the nonsense
+    # "-3/13 incorrect" on the first live run after this gate went pooled.
+    provenance = report["summary"]["provenance"]
+    total = (
+        provenance["real"]["question_count"] + provenance["synthetic"]["question_count"]
+    )
+    correct = report["summary"]["citation_correct_questions"]
+    real = provenance["real"]
+    detail = {
+        "correct_questions": correct,
+        "total_questions": total,
+        "real_correct_questions": real["citation_correct_questions"],
+        "real_total_questions": real["question_count"],
+    }
     if total == 0:
         return _item(
             "citation_correctness",
             ABSOLUTE,
             STATUS_NOT_EVALUABLE,
             detail=detail,
-            reason="no real-provenance questions in this run",
+            reason="no questions in this run",
         )
     status = STATUS_PASS if correct == total else STATUS_FAIL
     reason = (
         None
         if status == STATUS_PASS
-        else f"{total - correct}/{total} real-provenance question(s) had an "
-        "incorrect citation binding; D1 requires 100%, not 'mostly correct'"
+        else f"{total - correct}/{total} question(s) had an incorrect "
+        "citation binding; D1 requires 100%, not 'mostly correct'"
     )
     return _item("citation_correctness", ABSOLUTE, status, detail=detail, reason=reason)
 
@@ -226,13 +244,15 @@ def _gate_privacy_false_negative(report: dict) -> dict[str, Any]:
     real_fn = real["privacy_false_negatives"]
     pooled_fn = report["summary"]["privacy_false_negatives"]
     detail = {"real_false_negatives": real_fn, "pooled_false_negatives": pooled_fn}
-    status = STATUS_PASS if real_fn == 0 else STATUS_FAIL
+    # Zero tolerance is run-wide (RP2 / Codex round 1): a leak on a synthetic
+    # question is still a leak by the engine under test. The real-group
+    # scoping in the D1 ruling governs relative thresholds only.
+    status = STATUS_PASS if pooled_fn == 0 else STATUS_FAIL
     reason = (
         None
         if status == STATUS_PASS
-        else f"{real_fn} non-public path(s) leaked in real-provenance "
-        "questions -- RP2 is zero-tolerance, this is a hard failure, not a "
-        "deduction"
+        else f"{pooled_fn} non-public path(s) leaked across the run -- RP2 "
+        "is zero-tolerance, this is a hard failure, not a deduction"
     )
     return _item(
         "privacy_false_negative", ABSOLUTE, status, detail=detail, reason=reason
@@ -376,19 +396,22 @@ def _gate_latency_p95(report: dict) -> dict[str, Any]:
     threshold = qmd_p95 * 2
     detail["qmd_p95_ms"] = qmd_p95
     detail["threshold_ms"] = threshold
+    # RP3 (Codex round 1): the verdict reads lexical only. The vector P95
+    # stays in detail as information -- under the hash baseline
+    # (semantic=false) it must not decide anything, and even under a
+    # semantic provider this gate keeps the deliberate lexical-only default
+    # documented at module level. Pooled-by-design basis: the report carries
+    # no per-provenance latency (#26 round 3 ruling -- wall-clock is not a
+    # self-certification risk), and both engines answered the identical
+    # pooled question set, so the comparison is symmetric.
+    detail["basis"] = "pooled-by-design; verdict from lexical only (RP3)"
     lexical_ok = lexical_p95 <= threshold
-    vector_ok = vector_p95 <= threshold
-    status = STATUS_PASS if lexical_ok and vector_ok else STATUS_FAIL
-    reason = None
-    if status == STATUS_FAIL:
-        offenders = []
-        if not lexical_ok:
-            offenders.append(f"lexical {lexical_p95}ms")
-        if not vector_ok:
-            offenders.append(f"vector {vector_p95}ms")
-        reason = (
-            f"{', '.join(offenders)} exceed(s) 2x the QMD P95 baseline ({threshold}ms)"
-        )
+    status = STATUS_PASS if lexical_ok else STATUS_FAIL
+    reason = (
+        None
+        if status == STATUS_PASS
+        else f"lexical {lexical_p95}ms exceeds 2x the QMD P95 baseline ({threshold}ms)"
+    )
     return _item("latency_p95", RELATIVE, status, detail=detail, reason=reason)
 
 
