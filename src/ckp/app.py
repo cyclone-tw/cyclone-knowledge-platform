@@ -76,10 +76,13 @@ class HealthResponse(BaseModel):
 
 
 class RevisionResponse(BaseModel):
-    """The four fields required by OKF contract §3 Phase 3.
+    """The four contract fields plus the C-issue-39 staleness flag.
 
-    Any field may be ``null``: absent evidence is reported as absent rather
-    than filled with a placeholder.
+    Any of the four contract fields may be ``null``: absent evidence is
+    reported as absent rather than filled with a placeholder. ``stale`` is
+    additive -- it does not change the meaning or presence of the four
+    original fields, so a consumer pinned to the original four-field
+    contract is unaffected.
     """
 
     profile_version: str | None
@@ -89,6 +92,15 @@ class RevisionResponse(BaseModel):
     sources: dict[str, str] = Field(
         description="Where each field came from, so self-declared and derived "
         "evidence stay distinguishable"
+    )
+    stale: bool | None = Field(
+        description="True when the snapshot other routes were serving just "
+        "before this request no longer matches a fresh recomputation from "
+        "the bundle root -- contract §5.5's rollback trigger made "
+        "observable. False when nothing was served yet (no prior snapshot "
+        "to have drifted from) or when both revisions are known and equal. "
+        "null when a snapshot was served but either revision cannot be "
+        "determined: unknown is reported as unknown, never as fresh."
     )
 
 
@@ -200,9 +212,34 @@ def create_app(
 
     @app.get("/revision", response_model=RevisionResponse)
     def revision() -> RevisionResponse:
-        return RevisionResponse(
-            **build_revision(app.state.config, app.state.snapshot_cache).as_dict()
-        )
+        cache = app.state.snapshot_cache
+        # Read what other routes were serving *before* this request touches
+        # the cache at all -- ``peek`` never probes the filesystem. ``get``
+        # (inside build_revision, below) always re-verifies and self-heals,
+        # so it can never be compared against itself to find drift; the
+        # pre-call peek is the only thing that can have gone stale.
+        served_before = cache.peek()
+        current = build_revision(app.state.config, cache)
+        # A full-bundle hash recompute on every /revision call is the
+        # accepted cost here (contract §5.5 names this rollback trigger
+        # explicit): pilot-scale bundles make it cheap, and only /revision
+        # pays it -- /catalog and /query were already paying the same cost
+        # via SnapshotCache.get()'s per-call verification.
+        # Codex round 1 on #39: `None != None` is False, so "either side's
+        # revision is unknown" read as *fresh* -- the recurring
+        # unknown-reported-as-a-verdict shape, here at the exact rollback
+        # signal §5.5 exists to protect. Three-valued now: False only when
+        # both revisions are known and equal (or nothing was ever served),
+        # True only when both are known and differ, None when a snapshot was
+        # served but either revision cannot be determined -- unknown is said
+        # plainly, never dressed as fresh.
+        if served_before is None:
+            stale: bool | None = False
+        elif served_before.index_revision is None or current.index_revision is None:
+            stale = None
+        else:
+            stale = served_before.index_revision != current.index_revision
+        return RevisionResponse(**current.as_dict(), stale=stale)
 
     def unavailable() -> HTTPException:
         return HTTPException(status_code=503, detail="bundle-unavailable")

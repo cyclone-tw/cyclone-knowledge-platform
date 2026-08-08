@@ -617,6 +617,21 @@ class SnapshotCache:
         with self._lock:
             self._generation += 1
 
+    def peek(self) -> BundleSnapshot | None:
+        """The last snapshot materialized by ``get``, without a fresh probe.
+
+        ``get`` always re-verifies against the filesystem before returning,
+        so it can never observe its own staleness -- by the time it answers,
+        it has already healed. ``peek`` is the other half of that story: it
+        reports what was actually served *before* this call, so a caller
+        (``/revision``) can compare "what other requests were just served"
+        against a fresh recomputation and flag drift between the two,
+        instead of only ever comparing a self-healing value against itself.
+        Returns ``None`` before the first ``get`` call on this instance.
+        """
+        with self._lock:
+            return self._snapshot
+
     @staticmethod
     def _content_digest(raw: bytes | None) -> str | None:
         return hashlib.sha256(raw).hexdigest() if raw is not None else None
