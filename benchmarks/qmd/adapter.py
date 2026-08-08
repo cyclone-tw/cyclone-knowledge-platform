@@ -17,7 +17,10 @@ list. Three invariants this module exists to enforce, not just document:
    returns is pre-filtered to ``QmdBaselineConfig.corpus_paths`` before it
    ever reaches a caller -- ``QmdQueryResult.paths`` is the *filtered* list;
    ``raw_paths`` is kept only so a caller can report how much got filtered
-   out, never to widen the scored set back out.
+   out, never to widen the scored set back out. Filtering recognizes each
+   corpus path in qmd's own spelling as well (qmd strips the leading
+   underscore from directory names -- issue #58, see ``_qmd_visible_path``)
+   and always scores the canonical spelling.
 3. **Fail loud, never fall back.** Every failure mode below --binary
    missing, wiki root missing, non-zero exit, timeout, malformed JSON, a
    hit missing its ``file`` field-- raises :class:`QmdUnavailable` rather
@@ -127,6 +130,25 @@ class QmdBaselineConfig:
                 "scope. Pass the actual corpus scope (e.g. "
                 "ckp.pilot.PILOT_NOTE_PATHS)."
             )
+        # Two corpus paths that qmd renders identically (e.g.
+        # ``Core/_inbox/a.md`` and ``Core/inbox/a.md`` -- see
+        # ``_qmd_visible_path``) could not be told apart in qmd output, so
+        # scoring either would be a guess. No real corpus does this today
+        # (the pilot manifest has no such pair); if one ever does, fail at
+        # construction rather than silently crediting one path with the
+        # other's hits.
+        visible_to_canonical: dict[str, str] = {}
+        for path in sorted(self.corpus_paths):
+            visible = _qmd_visible_path(path)
+            other = visible_to_canonical.setdefault(visible, path)
+            if other != path:
+                raise QmdConfigError(
+                    f"corpus_paths {other!r} and {path!r} are "
+                    f"indistinguishable in qmd output (both appear as "
+                    f"{visible!r} after qmd strips the leading underscore "
+                    "from directory names); qmd hits could not be "
+                    "attributed to one of them honestly"
+                )
 
 
 @dataclass(frozen=True)
@@ -178,21 +200,71 @@ def qmd_token_cost(paths: tuple[str, ...], *, wiki_root: Path) -> int | None:
     return total
 
 
+def _qmd_visible_path(path: str) -> str:
+    """``path`` as qmd's own document namespace renders it.
+
+    Observed against the real named ``cyclone-wiki`` index (issue #58,
+    2026-08-08, qmd 2.5.3): qmd strips one leading underscore from each
+    *directory* name, so ``Core/_inbox/agent-captures/foo.md`` is listed,
+    fetched, and returned in search hits as
+    ``Core/inbox/agent-captures/foo.md`` -- ``qmd ls`` finds nothing under
+    the underscored spelling, and ``qmd get`` canonicalizes either spelling
+    to the stripped one. ``--full-path`` cannot undo it: resolving the
+    stripped path against the checkout fails (no such file), so those hits
+    stay in ``qmd://`` URI form with the stripped spelling inside.
+
+    The *filename* segment is deliberately left untouched. Whether qmd
+    also strips a file-level leading underscore is unobservable today (the
+    wiki has no ``_``-prefixed ``.md`` file to probe), and transforming it
+    anyway would widen the accepted alias space beyond observed behavior:
+    a corpus entry ``Core/_inbox/_note.md`` would then also claim hits
+    spelled ``Core/inbox/note.md``, which under the observed
+    directory-only rule is how qmd renders the *different* file
+    ``Core/_inbox/note.md`` -- a false credit (#61 review round 1). If a
+    ``_``-prefixed filename ever enters the corpus and qmd does strip it,
+    that surfaces as a conspicuous miss to investigate, never as a
+    silently wrong baseline.
+
+    Without this mapping, every hit on a note under ``Core/_inbox/`` fails
+    the ``corpus_paths`` membership test and gets scored as a QMD miss --
+    on the first live #58 probe, QMD ranked the two D2 ``_inbox`` pilot
+    notes at rank 1 for their rewritten queries and the adapter still
+    reported both as misses. That is a false baseline in the platform's
+    favor, the exact shape D3's scope-overlap precondition exists to keep
+    out of the comparison.
+    """
+    segments = path.split("/")
+    return "/".join(
+        [
+            *(
+                segment[1:] if segment.startswith("_") else segment
+                for segment in segments[:-1]
+            ),
+            segments[-1],
+        ]
+    )
+
+
 def _normalize_path(raw: str) -> str:
     """Map one ``qmd --full-path --format json`` ``file`` value to a
-    wiki-root-relative path.
+    wiki-root-relative path *as qmd spells it*.
 
     Observed shapes from a real run against the named ``cyclone-wiki``
     index (2026-08-07, ``qmd --index cyclone-wiki search ... --full-path
     --format json``, invoked with ``cwd`` set to the wiki checkout root):
 
     * ``"./Core/foo.md"`` -- the common case, cwd-relative.
-    * ``"qmd://cyclone-wiki/Core/foo.md?index=cyclone-wiki"`` -- seen for at
-      least one hit in the same response; the collection-URI form.
+    * ``"qmd://cyclone-wiki/Core/foo.md?index=cyclone-wiki"`` -- the
+      collection-URI form; ``--full-path`` falls back to it whenever the
+      indexed path does not resolve on disk, which is every note under an
+      underscore-prefixed directory (see ``_qmd_visible_path``).
 
     Anything else is returned unchanged rather than guessed at: an unmatched
     shape simply fails the ``corpus_paths`` membership test downstream
-    instead of being silently mis-mapped into a false match.
+    instead of being silently mis-mapped into a false match. The returned
+    path may still be qmd's underscore-stripped spelling of a real path;
+    ``run_qmd_query`` resolves that against ``corpus_paths`` via
+    ``_qmd_visible_path``, and this function stays a pure string extractor.
     """
     text = raw.strip()
     if text.startswith("./"):
@@ -241,6 +313,31 @@ def run_qmd_query(
     if not config.wiki_root.is_dir():
         raise QmdUnavailable(f"wiki root {config.wiki_root} is not a directory")
 
+    # Membership is tested in both spellings of each corpus path: the
+    # canonical one and qmd's underscore-stripped rendering of it
+    # (``_qmd_visible_path``); ``__post_init__`` guarantees no two corpus
+    # paths share a rendering. One ambiguity ``__post_init__`` cannot see:
+    # a *non-corpus* file on disk at the stripped spelling (e.g. a real
+    # ``Core/inbox/a.md`` next to corpus ``Core/_inbox/a.md``) would be
+    # indistinguishable from the corpus note in qmd output, so a hit could
+    # not be attributed honestly -- fail the run rather than guess. Checked
+    # here, not at construction: it is a property of the wiki checkout, not
+    # of the config, and this function is the first point that may read
+    # ``wiki_root``.
+    canonical_by_spelling: dict[str, str] = {}
+    for corpus_path in sorted(config.corpus_paths):
+        canonical_by_spelling[corpus_path] = corpus_path
+        visible = _qmd_visible_path(corpus_path)
+        if visible == corpus_path:
+            continue
+        if (config.wiki_root / visible).exists():
+            raise QmdUnavailable(
+                f"cannot attribute qmd hits for {visible!r}: both "
+                f"{corpus_path!r} (corpus) and {visible!r} exist in the "
+                "wiki checkout, and qmd renders them identically"
+            )
+        canonical_by_spelling[visible] = corpus_path
+
     command = _build_command(query, config=config, top_k=top_k)
     try:
         completed = subprocess.run(
@@ -277,15 +374,18 @@ def run_qmd_query(
             raise QmdUnavailable(f"qmd hit missing 'file' field: {entry!r}")
         raw = str(entry["file"])
         raw_paths.append(raw)
-        normalized = _normalize_path(raw)
-        if normalized not in config.corpus_paths or normalized in seen:
+        # Scored paths are always the *canonical* spelling, so downstream
+        # consumers (``_hit`` against ``expected_paths``, ``qmd_token_cost``
+        # reading ``wiki_root / path``) never see qmd's.
+        canonical = canonical_by_spelling.get(_normalize_path(raw))
+        if canonical is None or canonical in seen:
             continue
-        seen.add(normalized)
-        paths.append(normalized)
+        seen.add(canonical)
+        paths.append(canonical)
         score = entry.get("score")
         hits.append(
             QmdHit(
-                relative_path=normalized,
+                relative_path=canonical,
                 score=score if isinstance(score, (int, float)) else None,
             )
         )

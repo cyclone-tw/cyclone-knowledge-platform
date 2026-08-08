@@ -9,10 +9,31 @@ Issue #26 (P5, Epic #21 D2) adds a second, real half: ``REAL_QUESTIONS``
 targets six real Cyclone-Wiki notes frozen by D2 and read live through
 ``ckp.pilot`` (issue #23) -- this module carries only their *paths* (a local
 mirror of ``ckp.pilot.PILOT_NOTE_PATHS``, see ``_PILOT_NOTE_PATHS`` below)
-and hand-written queries about what their
-filenames say they are about, never their bodies. ``tests/test_no_wiki_content.py``
-enforces that no real note content ever lands in this repo; nothing here
-weakens that guard.
+and hand-written queries. ``tests/test_no_wiki_content.py`` enforces that no
+real note content ever lands in this repo; nothing here weakens that guard.
+
+**Real-question writing rule (issue #58, question set version 3).** Every
+term in a real question's query must come from one of the two sources RP1
+permits the question writer to look at:
+
+* the note's *filename* (its path segments, split on hyphens), and
+* the note's *H1 heading* -- the same first ``# `` line the Catalog already
+  exposes as ``heading_title`` (issue #48 established that surfacing it is
+  privacy-safe; #58 extends that ruling to question writing).
+
+The note *body* is never read and never paraphrased (RP1). Version 2's
+queries added natural-language connective phrases that came from neither
+source (``"...的標準程序"``, ``"...專案範圍"``, ``"分析摘要"``); live probing
+in #58 showed ``qmd search`` (BM25) is *conjunctive* -- every query term
+must appear in a document for it to match at all -- so each invented term
+made the frozen query retrieve literally nothing, wiki-wide, and the whole
+QMD baseline degenerated to zero hits. Version 3's queries therefore stay
+inside the filename/H1 vocabulary: near-verbatim H1 wording where that
+wording retrieves under BM25 (r03--r05), naturalized filename tokens where
+the H1's punctuation defeats tokenization (r01, r06 -- its H1 spells
+``2.0：`` with a fullwidth colon), and the union of both filenames' tokens
+for the cross-note question (r02; see its entry for why QMD structurally
+cannot answer it).
 
 Every ``BenchmarkQuestion`` carries a ``provenance`` of ``"real"`` or
 ``"synthetic"``. This exists because a mixed corpus that does not label its
@@ -23,8 +44,13 @@ harness, and eventually the P9 report/gate) must keep real and synthetic
 statistics separate rather than average them into one number.
 
 Changing the corpus or either question tuple changes what the benchmark
-measures, so ``CORPUS_VERSION`` and ``QUESTION_SET_VERSION`` are bumped
-together whenever either changes.
+measures. Each change bumps its own version -- ``CORPUS_VERSION`` for
+``CORPUS``, ``QUESTION_SET_VERSION`` for ``QUESTIONS``/``REAL_QUESTIONS``
+-- and ``tests/test_benchmark_versions.py`` pins each version to a
+fingerprint of exactly the content it names, independently (its
+``test_corpus_and_question_set_versions_are_independent`` makes not
+bumping the untouched side a checked guarantee, not an accident: #58
+bumped only the question side).
 """
 
 from __future__ import annotations
@@ -55,7 +81,7 @@ _PILOT_NOTE_PATHS: tuple[str, ...] = (
 )
 
 CORPUS_VERSION = "3"
-QUESTION_SET_VERSION = "2"
+QUESTION_SET_VERSION = "3"
 
 
 @dataclass(frozen=True)
@@ -299,10 +325,28 @@ COFFEE_LOG_QUESTION_IDS: tuple[str, ...] = ("q01-espresso", "q02-kettlebell")
 
 #: Real questions (issue #26, Epic #21 D2): six notes D2 froze, read live
 #: through ``ckp.pilot.bind_pilot_corpus`` -- never vendored here. Queries
-#: below are hand-written from what each note's *filename* says it is about;
-#: none is copied from, or paraphrases, the note's actual body (this repo
-#: never reads those bodies -- see the module docstring and
-#: ``tests/test_no_wiki_content.py``).
+#: below are hand-written from each note's filename tokens and H1 heading
+#: only (the #58 rule in the module docstring); none is copied from, or
+#: paraphrases, the note's actual body (this repo never reads those bodies
+#: -- see the module docstring and ``tests/test_no_wiki_content.py``).
+#:
+#: Each query below was probed live against the named ``cyclone-wiki`` QMD
+#: index (issue #58, 2026-08-08, ``qmd search -n 5``): r01 and r03--r06
+#: rank their target note top-5 wiki-wide (r01, r03, r05, r06 at rank 1;
+#: r04 at rank 2). r02 is the one exception, and the miss is structural,
+#: not a wording accident: ``qmd search`` is conjunctive, and probing shows
+#: its first target never matches any query containing ``scopes`` (the
+#: second target's discriminating vocabulary), while the vocabulary the
+#: two targets share (``procedure``/``agent``/``wiki``) is too generic to
+#: rank either one top-5 wiki-wide. No plain-keyword query drawn from the
+#: sanctioned sources can put both notes in one top-5, so r02 measures a
+#: real capability boundary of the baseline (single conjunctive query vs.
+#: cross-note integration -- the very capability D2 froze a second
+#: procedure note to test), and QMD's expected score on it is a recorded
+#: miss, not a rigged one. OR-syntax was probed too and is not honored by
+#: ``qmd search``; the platform's own lexical engine is disjunctive
+#: (per-token additive scoring), so the identical query string remains
+#: answerable there.
 #:
 #: Mapping to ``_PILOT_NOTE_PATHS`` (Core procedure ×2, Decision, Project,
 #: external Source ×2 -- D2's six):
@@ -320,45 +364,53 @@ COFFEE_LOG_QUESTION_IDS: tuple[str, ...] = ("q01-espresso", "q02-kettlebell")
 #: * ``_PILOT_NOTE_PATHS[4]``, ``_PILOT_NOTE_PATHS[5]`` (external captures)
 #:   -> external-source
 REAL_QUESTIONS: tuple[BenchmarkQuestion, ...] = (
+    # Filename tokens naturalized ("procedure-agent-wiki-note-retrieval").
     BenchmarkQuestion(
         "r01-wiki-note-retrieval",
         "precise-note",
-        "agent 讀取 wiki note 的標準程序 retrieval procedure",
+        "agent wiki note retrieval procedure",
         (_PILOT_NOTE_PATHS[0],),
         "real",
     ),
+    # Union of both filenames' tokens -- the structural QMD miss documented
+    # in the tuple comment above.
     BenchmarkQuestion(
         "r02-retrieval-and-memory-scopes",
         "cross-note",
-        "agent wiki note retrieval 與 memory read scopes 兩份程序的關聯",
+        "agent wiki note retrieval memory read scopes procedure",
         (_PILOT_NOTE_PATHS[0], _PILOT_NOTE_PATHS[1]),
         "real",
     ),
+    # H1 wording verbatim, minus the "Decision: " taxonomy prefix.
     BenchmarkQuestion(
         "r03-openwiki-role-boundary",
         "latest-status",
-        "Cyclone-Wiki 與 OpenWiki 目前的角色邊界決策",
+        "Cyclone-Wiki 與 OpenWiki 的角色分工與整合方式",
         (_PILOT_NOTE_PATHS[2],),
         "real",
     ),
+    # H1 verbatim (the note's H1 carries no taxonomy prefix).
     BenchmarkQuestion(
         "r04-okf-knowledge-contract",
         "precise-note",
-        "Cyclone OKF knowledge contract 專案範圍",
+        "Cyclone OKF Knowledge Contract",
         (_PILOT_NOTE_PATHS[3],),
         "real",
     ),
+    # H1 verbatim.
     BenchmarkQuestion(
         "r05-relayapi-analysis",
         "external-source",
-        "RelayAPI repo 分析摘要",
+        "relayAPI repo analysis and Cyclone application notes",
         (_PILOT_NOTE_PATHS[4],),
         "real",
     ),
+    # Filename tokens: the H1's fullwidth-punctuated "2.0：100 Stars 之後的
+    # 三條 Loops" wording retrieves nothing under BM25 tokenization.
     BenchmarkQuestion(
         "r06-hermes-os-loops",
         "external-source",
-        "Hermes OS 2 100 stars loops 摘要",
+        "Hermes OS 2 100 stars loops",
         (_PILOT_NOTE_PATHS[5],),
         "real",
     ),
