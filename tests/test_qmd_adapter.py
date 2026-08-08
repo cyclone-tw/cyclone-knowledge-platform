@@ -23,6 +23,7 @@ from benchmarks.qmd.adapter import (
     QmdConfigError,
     QmdUnavailable,
     _normalize_path,
+    _qmd_visible_path,
     qmd_binary_available,
     qmd_token_cost,
     run_qmd_query,
@@ -210,6 +211,124 @@ def test_run_qmd_query_deduplicates_repeated_normalized_paths(
     result = run_qmd_query("q", config=config, top_k=5)
     assert result.paths == ("Core/a.md",)
     assert len(result.hits) == 1
+
+
+# --- qmd's underscore-stripped path spelling (issue #58) ----------------
+
+
+def test_qmd_visible_path_strips_one_leading_underscore_per_segment() -> None:
+    assert (
+        _qmd_visible_path("Core/_inbox/agent-captures/x.md")
+        == "Core/inbox/agent-captures/x.md"
+    )
+    assert _qmd_visible_path("Core/a.md") == "Core/a.md"
+
+
+def test_run_qmd_query_scores_hits_qmd_returns_in_stripped_spelling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The #58 false-miss: qmd's own namespace drops the leading underscore
+    from directory names, so a hit on ``Core/_inbox/...`` comes back spelled
+    ``Core/inbox/...`` (in ``qmd://`` URI form -- ``--full-path`` cannot
+    resolve the stripped spelling on disk). Before the mapping, that hit
+    failed the ``corpus_paths`` membership test and was scored as a QMD
+    miss even though qmd ranked the note first -- a false baseline in the
+    platform's favor. Scored paths must come back in the *canonical*
+    spelling: ``expected_paths`` and ``qmd_token_cost`` both read it.
+    """
+    corpus_path = "Core/_inbox/agent-captures/2026-07-04-x.md"
+    payload = [
+        {
+            "score": 0.9,
+            "file": (
+                "qmd://cyclone-wiki/Core/inbox/agent-captures/2026-07-04-x.md"
+                "?index=cyclone-wiki"
+            ),
+        },
+    ]
+    monkeypatch.setattr("shutil.which", lambda binary: "/usr/local/bin/qmd")
+    monkeypatch.setattr(
+        "subprocess.run", lambda *a, **k: _fake_completed(json.dumps(payload))
+    )
+    config = _config(tmp_path, corpus_paths=frozenset({corpus_path}))
+    result = run_qmd_query("q", config=config, top_k=5)
+    assert result.paths == (corpus_path,)
+    assert result.hits[0].relative_path == corpus_path
+    assert result.hits[0].score == 0.9
+
+
+def test_run_qmd_query_does_not_credit_stripped_paths_outside_the_corpus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AGENTS.md §9 Q2: a compliant-*looking* hit -- same ``Core/inbox/...``
+    stripped spelling, but of a path the corpus never contained -- must
+    still be filtered out, not waved through by an over-broad reverse map.
+    """
+    payload = [
+        {
+            "score": 0.9,
+            "file": "qmd://cyclone-wiki/Core/inbox/other.md?index=cyclone-wiki",
+        },
+    ]
+    monkeypatch.setattr("shutil.which", lambda binary: "/usr/local/bin/qmd")
+    monkeypatch.setattr(
+        "subprocess.run", lambda *a, **k: _fake_completed(json.dumps(payload))
+    )
+    config = _config(
+        tmp_path, corpus_paths=frozenset({"Core/_inbox/agent-captures/x.md"})
+    )
+    result = run_qmd_query("q", config=config, top_k=5)
+    assert result.paths == ()
+    assert result.raw_paths == (payload[0]["file"],)
+
+
+def test_run_qmd_query_deduplicates_canonical_and_stripped_spellings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = [
+        {"score": 0.9, "file": "./Core/_inbox/a.md"},
+        {"score": 0.5, "file": "qmd://cyclone-wiki/Core/inbox/a.md?index=cyclone-wiki"},
+    ]
+    monkeypatch.setattr("shutil.which", lambda binary: "/usr/local/bin/qmd")
+    monkeypatch.setattr(
+        "subprocess.run", lambda *a, **k: _fake_completed(json.dumps(payload))
+    )
+    config = _config(tmp_path, corpus_paths=frozenset({"Core/_inbox/a.md"}))
+    result = run_qmd_query("q", config=config, top_k=5)
+    assert result.paths == ("Core/_inbox/a.md",)
+    assert len(result.hits) == 1
+    assert result.hits[0].score == 0.9
+
+
+def test_corpus_paths_indistinguishable_to_qmd_are_rejected_at_construction(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(QmdConfigError, match="indistinguishable"):
+        _config(
+            tmp_path,
+            corpus_paths=frozenset({"Core/_inbox/a.md", "Core/inbox/a.md"}),
+        )
+
+
+def test_run_qmd_query_fails_loud_when_stripped_spelling_also_exists_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real, non-corpus file at the stripped spelling makes qmd hits
+    unattributable (both files render identically in qmd output), and that
+    is a property ``__post_init__`` cannot see -- checked per query, before
+    the subprocess ever runs.
+    """
+    (tmp_path / "Core" / "inbox").mkdir(parents=True)
+    (tmp_path / "Core" / "inbox" / "a.md").write_text("decoy\n", encoding="utf-8")
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("subprocess.run must not be reached")
+
+    monkeypatch.setattr("shutil.which", lambda binary: "/usr/local/bin/qmd")
+    monkeypatch.setattr("subprocess.run", fail_if_called)
+    config = _config(tmp_path, corpus_paths=frozenset({"Core/_inbox/a.md"}))
+    with pytest.raises(QmdUnavailable, match="cannot attribute"):
+        run_qmd_query("q", config=config, top_k=5)
 
 
 # --- fail-loud, never a partial/empty stand-in --------------------------

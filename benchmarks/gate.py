@@ -6,18 +6,24 @@ that make the four relative dimensions meaningful at all. This module never
 loosens, reorders, or reinterprets a D1 threshold -- D1 is frozen; changing
 it means reopening Epic #21's decision comment, not editing this file.
 
-**Real provenance only.** D1: "門檻套用在 real provenance 那組" -- the
-synthetic corpus is questions this implementation wrote to be found, and
-grading it against its own self-authored answer key is not evidence of
-anything. Every threshold below reads ``report["summary"]["provenance"]
+**Which questions each threshold reads (#60 R2).** D1's "門檻套用在 real
+provenance 那組" scopes the *relative* comparisons: the synthetic corpus is
+questions this implementation wrote to be found, and grading a comparison
+against its own self-authored answer key is not evidence of anything. The
+relative dimensions with per-provenance data (``answerable_hit_rate``,
+``context_token_total``) therefore read ``report["summary"]["provenance"]
 ["real"]`` (or, for the QMD side -- see next paragraph -- a real-only slice
-recomputed from ``report["questions"]``), never the pooled top-level numbers
-and never ``["synthetic"]``. ``latency_ms`` is the one deliberate exception:
-``benchmarks.shadow``'s own module docstring says latency is pooled-only by
-design (a synthetic question cannot cheaply inflate a wall-clock number the
-way it can inflate a hit rate), so this gate follows that established
-decision rather than inventing a per-provenance latency split nothing else
-in the report supports.
+recomputed from ``report["questions"]``), never ``["synthetic"]``. The
+*absolute* dimensions (``citation_correctness``, ``privacy_false_negative``)
+judge the whole run, pooled across both provenances (Codex round 1 on #30):
+a citation bound to the wrong commit, or a leaked non-public path, is the
+same defect on a synthetic question as on a real one -- self-certification
+is a relative-threshold disease, not an absolute one. ``latency_p95`` is
+pooled by necessity (``benchmarks.shadow`` deliberately never split latency
+by provenance: a synthetic question cannot cheaply inflate a wall-clock
+number the way it can inflate a hit rate) and its verdict reads the
+``lexical`` P95 only -- see ``_gate_latency_p95`` and the RP3 paragraph
+below.
 
 **Why this module recomputes real-provenance QMD stats instead of reading
 them from the report.** ``benchmarks.shadow.run_shadow_benchmark`` tracks
@@ -367,13 +373,15 @@ def _gate_context_token_total(report: dict, qmd_stats: dict) -> dict[str, Any]:
 def _gate_latency_p95(report: dict) -> dict[str, Any]:
     """Pooled, not real-only -- ``benchmarks.shadow``'s own documented design.
 
-    See the module docstring's "Real provenance only" section: latency is
-    the one dimension the shadow harness deliberately never split by
-    provenance, because a synthetic question cannot cheaply inflate a
-    wall-clock number the way it can inflate a hit rate. Both platform
-    engines are checked (unlike the hit-rate/token gates, this is a speed
-    measurement, not a quality claim, so RP3's "vector must never win on
-    quality" does not apply) -- the gate fails if *either* exceeds 2x.
+    See the module docstring's "Which questions each threshold reads"
+    section: latency is the one dimension the shadow harness deliberately
+    never split by provenance, because a synthetic question cannot cheaply
+    inflate a wall-clock number the way it can inflate a hit rate. The
+    verdict reads the ``lexical`` P95 only (#60 R2): lexical is the
+    platform's actual served answer, so the module-level RP3 lexical-only
+    default applies to this dimension exactly as it does to the hit-rate
+    and token gates; the ``vector`` P95 stays in ``detail`` as information
+    and never decides anything.
     """
     latency = report["latency_ms"]
     qmd_latency = latency.get("qmd")

@@ -76,6 +76,11 @@ _CORPUS_FINGERPRINTS_BY_VERSION: dict[str, str] = {
 #: version}. Same update rule as above, but for question content.
 _QUESTION_SET_FINGERPRINTS_BY_VERSION: dict[str, str] = {
     "2": "4a7159150ceb2019a5167f9ff09c7f89e2768e11f9b392bb103659f576724af5",
+    # 3: issue #58 -- the six real-question queries rewritten to the
+    # filename/H1 vocabulary rule after version 2's queries retrieved
+    # nothing under QMD BM25 (degenerate baseline). expected_paths, ids,
+    # categories, and provenance are unchanged from version 2.
+    "3": "04e83bb35331f5c7d3c8aa464c81e440073de65ca7d09bc6ddb2a553799a9a0a",
 }
 
 
