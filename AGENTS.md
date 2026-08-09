@@ -33,11 +33,18 @@ No note bodies, no student data, no adult private meeting notes.
 ## 2. Issue-first
 
 Global rule — canonical text: `cyclone-agent-config`
-`shared/shared-agent-rules.md` §5.3 (issue before feature / behavior / runtime
-/ CI changes; acceptance task lists ticked as work lands; `Closes #NN` only on
-the closing PR, staged commits never use closing keywords) plus the global
-rules' GitHub Issue First section (English `feat:`/`fix:`/`ops:`/`docs:`
-titles, Traditional Chinese bodies). No repo-specific deviations.
+`shared/shared-agent-rules.md` §5.2 (issue-first ship pipeline) and §5.3
+(acceptance task lists ticked as work lands, PR–issue linkage, closing
+keywords) plus the global rules' GitHub Issue First section (English
+`feat:`/`fix:`/`ops:`/`docs:` titles, Traditional Chinese bodies). Repo
+additions that bind here:
+
+- Issue before feature / behavior / deployment / automation / runtime
+  configuration changes — and before changes to this file, CI, or the review
+  contract.
+- PRs always reference the issue: `Closes #NN` on the closing PR, `Ref #NN`
+  or `Part of #NN` on a staged one; staged commit messages never use closing
+  keywords.
 
 ## 3. Worktree isolation
 
@@ -61,15 +68,26 @@ specifics and additions that bind here:
 ## 4. Review contract
 
 Global rule — canonical text: shared-agent-rules §5.1.1 (reviews only through
-the sanctioned wrappers, single-instance) and §5.2 (Coder ≠ Reviewer pairing,
-machine-readable PR markers, attestation merge gate, auto-merge on `approved`
-or `nits-only` + CI green without asking, the three stop-and-ask cases, loop
-cap 2, hard-stop list). Repo defaults on top of the canon:
+the sanctioned wrappers) and §5.2 (pairing table, machine-readable PR markers,
+attestation merge gate, auto-merge thresholds, stop-and-ask cases, hard-stop
+list). Pinned clauses and repo defaults that bind here (guarded by
+`tests/test_repo_conventions.py`):
 
-- Review artifact time limit for the "review unavailable" stop case:
-  30 minutes.
-- When stopping to ask a human, use: 30-second background, one single
-  question, the cost of each option, and your recommendation.
+- **Coder ≠ Reviewer.** Codex is the primary reviewer for Claude Code; there
+  is no fallback reviewer tier (Cursor left the review chain 2026-07-27).
+- Codex reviews go only through cyclone-agent-config
+  `scripts/codex-review.sh`; Codex is single-instance — run reviews
+  sequentially, never in parallel.
+- The review prompt passes **file paths**, not pasted diffs, and must require
+  a literal `VERDICT: approved | nits-only | changes-requested` line.
+- Every review artifact carries the machine-readable trailer block, including
+  `Review-Status:` and `Reviewed-Commit:` bound to the PR HEAD under review.
+- Merge automatically — **do not ask permission to merge** — once the review
+  is `approved`, or `nits-only` with CI green.
+- Stop and ask a human only when: review unavailable (default time limit
+  30 minutes), `Review-Round` exceeded **2** without reaching `approved` or
+  `nits-only`, or a hard stop (§5). When stopping, use: 30-second background,
+  one single question, the cost of each option, and your recommendation.
 
 ## 5. Hard stops
 
