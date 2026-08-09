@@ -7,7 +7,7 @@ Upstream rule sources, in precedence order when they conflict:
 1. This file (most specific).
 2. `cyclone-wiki` `Core/project-cyclone-okf-knowledge-contract.md` — the OKF
    contract. This repo is Phase 3 of it.
-3. `cyclone-agent-config` `shared/shared-agent-rules.md` §5.2–5.4, §6.3.
+3. `cyclone-agent-config` `shared/shared-agent-rules.md` §5.1–5.5, §6.3.
 4. The global `AGENTS.md` / `CLAUDE.md` in the agent's home config.
 
 Report any conflict you find instead of silently picking one.
@@ -32,115 +32,62 @@ No note bodies, no student data, no adult private meeting notes.
 
 ## 2. Issue-first
 
-Create or reuse a GitHub issue **before**:
+Global rule — canonical text: `cyclone-agent-config`
+`shared/shared-agent-rules.md` §5.2 (issue-first ship pipeline) and §5.3
+(acceptance task lists ticked as work lands, PR–issue linkage, closing
+keywords) plus the global rules' GitHub Issue First section (English
+`feat:`/`fix:`/`ops:`/`docs:` titles, Traditional Chinese bodies). Repo
+additions that bind here:
 
-- New requirements, feature changes, behavior changes.
-- Deployment, automation, or runtime configuration changes.
-- Changes to this file, CI, or the review contract.
-
-Exceptions: read-only investigation, local-only secret handling, typo or
-formatting cleanup.
-
-Issue titles in concise English (`feat:`, `fix:`, `ops:`, `docs:`).
-Issue bodies and comments in Traditional Chinese.
-
-Development issues carry an acceptance task list. Tick each checkbox as the
-matching work lands — never batch-tick afterwards. A staged PR must have its
-own work unit already ticked before merge; the closing PR requires the whole
-list ticked. Done but unticked does not count as done.
-
-PRs always reference the issue: `Closes #NN` on the closing PR, `Ref #NN` or
-`Part of #NN` on a staged one. Staged commit messages must not use closing
-keywords.
+- Issue before feature / behavior / deployment / automation / runtime
+  configuration changes — and before changes to this file, CI, or the review
+  contract.
+- PRs always reference the issue: `Closes #NN` on the closing PR, `Ref #NN`
+  or `Part of #NN` on a staged one; staged commit messages never use closing
+  keywords.
 
 ## 3. Worktree isolation
 
-This checkout is shared between agents. **Never** run `git checkout <branch>`
-or `git switch <branch>` in the main checkout — it pulls the working tree out
-from under another agent. Read-only operations (`git log`, `git diff`,
-`git show <ref>:<path>`, `git fetch`) are unrestricted.
+Global rule — canonical text: shared-agent-rules §5.4 (never `git checkout` /
+`git switch` in the shared checkout; per-task ephemeral worktree; read-only
+git operations unrestricted; cleanup with `git worktree remove`). Repo
+specifics and additions that bind here:
 
-Also never leave staged-but-uncommitted changes in the shared main checkout:
-another agent's `git commit` will carry your index away with it. Stage and
-commit in one atomic invocation, or work in a worktree.
-
-Per-task ephemeral worktree:
-
-```bash
-R=~/Cyclone-System/cyclone-knowledge-platform
-git -C "$R" fetch --quiet origin
-git -C "$R" worktree add ~/Cyclone-System/worktrees/ckp-<issue>-<slug> \
-  -b <type>/<issue>-<slug> origin/main
-# edit / commit / push entirely inside the worktree (git -C <worktree> …)
-git -C "$R" worktree remove ~/Cyclone-System/worktrees/ckp-<issue>-<slug>
-```
-
-Naming: worktree at `~/Cyclone-System/worktrees/ckp-<issue>-<slug>`, branch
-`<type>/<issue>-<slug>` (type = `feat` / `fix` / `docs` / `ops` / …).
-The same branch cannot be checked out in two worktrees of the same repo.
-
-Record the base commit, `git status`, active worktrees and the expected file
-ownership before starting. Never stash, reset, clean, prune, or move another
-agent's worktree. If a file you need is already being modified by another
-agent, stop at that child issue boundary and pick non-overlapping work.
-
-One PR = one story. Schema, migration, UI and runtime deploy never share a PR.
+- Worktree `~/Cyclone-System/worktrees/ckp-<issue>-<slug>`, branch
+  `<type>/<issue>-<slug>`, base `origin/main`.
+- Never leave staged-but-uncommitted changes in the shared main checkout —
+  another agent's `git commit` will carry your index away. Stage and commit
+  in one atomic invocation, or work in a worktree.
+- Record the base commit, `git status`, and active worktrees before starting.
+  Never stash, reset, clean, prune, or move another agent's worktree. If a
+  file you need is already being modified by another agent, stop at that
+  child-issue boundary and pick non-overlapping work.
+- One PR = one story. Schema, migration, UI and runtime deploy never share a
+  PR.
 
 ## 4. Review contract
 
-**Coder ≠ Reviewer. Self-review followed by self-merge is a hard stop.**
+Global rule — canonical text: shared-agent-rules §5.1.1 (reviews only through
+the sanctioned wrappers) and §5.2 (pairing table, machine-readable PR markers,
+attestation merge gate, auto-merge thresholds, stop-and-ask cases, hard-stop
+list). Pinned clauses and repo defaults that bind here (guarded by
+`tests/test_repo_conventions.py`):
 
-| Coder | Primary reviewer |
-| --- | --- |
-| Claude Code | Codex |
-| Codex | Claude Code |
-| Anything else | Codex |
-
-There is no fallback reviewer tier (Cursor left the review chain 2026-07-27).
-
-Codex reviews always go through `cyclone-agent-config`
-`scripts/codex-review.sh`:
-
-```bash
-~/Cyclone-System/cyclone-agent-config/scripts/codex-review.sh \
-  -C ~/Cyclone-System/worktrees/ckp-<issue>-<slug> \
-  -o /tmp/verdict-r1.txt \
-  /tmp/review-prompt-r1.txt
-```
-
-The prompt file must pass **file paths**, not pasted diffs, and must require a
-literal `VERDICT: approved | nits-only | changes-requested` line. Codex is
-single-instance: run multiple reviews sequentially, never in parallel.
-
-Every PR body carries these machine-readable markers:
-
-```text
-Coder: claude-code | codex | grok
-Reviewer: codex | claude-code
-Review-Round: 1
-Reviewed-Commit: <PR HEAD SHA under review>
-Review-Status: pending | changes-requested | nits-only | approved | blocked
-Review-Blocked-Reason: <one line, only when blocked>
-```
-
-Merge automatically — **do not ask permission to merge** — once the review is
-`approved`, or `nits-only` with CI green. Findings mean fix and re-review, not
-stop.
-
-Stop and ask a human only in these three cases:
-
-1. **Review unavailable** — account/quota/timeout/service down, cannot fetch
-   the repo or diff, or no qualifying review artifact within the time limit
-   (default 30 min): no approval, no findings, no explicit blocked result.
-2. **Loop cap** — `Review-Round` exceeded **2** without reaching `approved`
-   or `nits-only`.
-3. **Hard-stop list** (§5).
-
-Not reasons to stop: the review has findings (fix them), only nits (merge),
-CI red but fixable by rerun or rebase.
-
-When stopping, use the format that works: 30-second background, one single
-question, the cost of each option, and your recommendation.
+- **Coder ≠ Reviewer.** Codex is the primary reviewer for Claude Code; there
+  is no fallback reviewer tier (Cursor left the review chain 2026-07-27).
+- Codex reviews go only through cyclone-agent-config
+  `scripts/codex-review.sh`; Codex is single-instance — run reviews
+  sequentially, never in parallel.
+- The review prompt passes **file paths**, not pasted diffs, and must require
+  a literal `VERDICT: approved | nits-only | changes-requested` line.
+- Every review artifact carries the machine-readable trailer block, including
+  `Review-Status:` and `Reviewed-Commit:` bound to the PR HEAD under review.
+- Merge automatically — **do not ask permission to merge** — once the review
+  is `approved`, or `nits-only` with CI green.
+- Stop and ask a human only when: review unavailable (default time limit
+  30 minutes), `Review-Round` exceeded **2** without reaching `approved` or
+  `nits-only`, or a hard stop (§5). When stopping, use: 30-second background,
+  one single question, the cost of each option, and your recommendation.
 
 ## 5. Hard stops
 
