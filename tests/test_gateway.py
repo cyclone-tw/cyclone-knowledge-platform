@@ -184,9 +184,9 @@ def test_query_cutoff_keeps_multi_target_boundary_ties(tmp_path: Path) -> None:
 def test_query_all_weak_matches_serve_nothing(tmp_path: Path) -> None:
     """Issue #62: the floor holds even when every match is weak.
 
-    Both notes match one generic token in the body (score 1) and the top
-    score is itself 1, so the ratio bar alone would keep everything; only
-    the absolute floor says a page of single-token matches is not an
+    Both notes match one of the two query tokens, so every candidate
+    ties for top and the ratio bar alone would keep everything; only
+    the coverage floor says a page of single-token matches is not an
     answer. Empty is the honest response (same doctrine as q10's empty
     no-answer question).
     """
@@ -204,8 +204,8 @@ def test_query_single_token_body_match_stays_servable(tmp_path: Path) -> None:
     """Issue #62: the floor is capped at the query's own token count.
 
     For a one-token query, a body-only match covers everything the caller
-    asked; the multi-token floor evidence ("score 1 is a generic tag-along")
-    does not apply and the result must still be served.
+    asked; the multi-token floor evidence (a single-token match is a
+    generic tag-along) does not apply and the result must be served.
     """
     write_note(tmp_path, "only.md", title="Unrelated", body="A quokka sighting.")
 
@@ -303,6 +303,99 @@ def test_query_length_normalized_frequency_outranks_a_padded_mention(
     body = response.json()
     assert [item["concept_id"] for item in body["results"]] == ["dense"]
     assert body["total"] == 1
+
+
+def test_query_crowded_field_keeps_a_close_second(tmp_path: Path) -> None:
+    """The crowded bar is three quarters, bracketed from both sides.
+
+    Three candidates pass the floor, so the strict bar applies. The
+    second candidate holds 0.84 of the top score -- above 3/4, served;
+    it stands in for r02's second expected answer at 0.865, the
+    real-corpus keep that pins the bar from above. The third holds
+    0.60 -- below 3/4, cut. Tightening the bar toward 0.865 flips the
+    first assertion; loosening it to 1/2 flips the second.
+    """
+    write_note(
+        tmp_path,
+        "first.md",
+        title="Ember cartography atlas",
+        body="Ember cartography atlas, expanded.",
+    )
+    write_note(
+        tmp_path,
+        "second.md",
+        title="Ember cartography",
+        body="Atlas entries continue.",
+    )
+    write_note(tmp_path, "third.md", title="Cartography", body="Ember maps.")
+
+    response = _client(tmp_path).post(
+        "/query", json={"query": "ember cartography atlas"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["concept_id"] for item in body["results"]] == ["first", "second"]
+    assert body["total"] == 2
+
+
+def test_query_sparse_field_still_cuts_a_distant_runner_up(
+    tmp_path: Path,
+) -> None:
+    """The sparse bar is lenient, not absent: a third of the top score.
+
+    Two candidates pass the floor, so the lenient bar applies -- but
+    the faint one holds only 0.23 of the top score, below 1/3, and is
+    cut: a two-candidate field does not serve every floor-passer.
+    Loosening the sparse bar to a fifth serves it.
+    """
+    write_note(
+        tmp_path,
+        "anchor.md",
+        title="Ember cartography atlas",
+        body="Ember cartography atlas, expanded.",
+    )
+    write_note(
+        tmp_path,
+        "faint.md",
+        title="Unrelated topic",
+        body="Ember appears once among cartography filler in this sentence.",
+    )
+
+    response = _client(tmp_path).post(
+        "/query", json={"query": "ember cartography atlas"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["concept_id"] for item in body["results"]] == ["anchor"]
+    assert body["total"] == 1
+
+
+def test_query_duplicate_query_tokens_do_not_inflate_the_floor(
+    tmp_path: Path,
+) -> None:
+    """Codex #68 round 1: repeated tokens must not buy floor coverage.
+
+    ``needle needle missing`` deduplicates to the two-token query it
+    actually asks, so a note matching ``needle`` alone covers one of
+    two tokens and falls at the floor -- before the fix each repetition
+    incremented coverage, so the needle-only match passed ``min(2, 3)``
+    and was served. The same dedup keeps single-term semantics:
+    ``needle needle`` *is* a one-token query, full coverage, served.
+    """
+    write_note(tmp_path, "only.md", title="Unrelated", body="A needle sighting.")
+    client = _client(tmp_path)
+
+    padded = client.post("/query", json={"query": "needle needle missing"})
+    collapsed = client.post("/query", json={"query": "needle needle"})
+
+    assert padded.status_code == 200
+    assert padded.json()["results"] == []
+    assert padded.json()["total"] == 0
+    assert collapsed.status_code == 200
+    assert [item["concept_id"] for item in collapsed.json()["results"]] == ["only"]
+    assert collapsed.json()["total"] == 1
 
 
 def test_query_partial_title_match_falls_at_the_coverage_floor(

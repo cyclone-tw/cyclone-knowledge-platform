@@ -83,16 +83,23 @@ _WHITESPACE = re.compile(r"\s+")
 #:   *candidate field*: q06 has ``2`` floor-passing candidates in the
 #:   whole catalog, r01 has ``6``. So the bar adapts to how contested
 #:   the query is: with at most ``_SPARSE_CANDIDATE_MAX`` candidates the
-#:   catalog itself says the topic is niche, and the runner-up is served
-#:   at half the top score (``_CUTOFF_RATIO_SPARSE``); in a crowded
-#:   field a result must hold three quarters of the top score
-#:   (``_CUTOFF_RATIO_CROWDED``) to justify its context tokens.
-#:   The measured distribution pins all three constants two-sidedly:
+#:   catalog itself says the topic is niche, and the runner-up is
+#:   served at a third of the top score (``_CUTOFF_RATIO_SPARSE_NUM /
+#:   _CUTOFF_RATIO_SPARSE_DEN``); in a crowded field a result must
+#:   hold three quarters of the top score (``_CUTOFF_RATIO_CROWDED_NUM
+#:   / _CUTOFF_RATIO_CROWDED_DEN``) to justify its context tokens.
+#:   The measured distributions pin every constant two-sidedly:
 #:   q06 (keep at 2 candidates) and r03 (kill its 0.544 sibling at 3)
-#:   force the boundary to exactly 2; 1/2 sits between r06's strongest
-#:   sparse non-answer (0.402) and q06's 0.648; 3/4 sits between r01's
-#:   0.698 and r02's second expected answer at 0.865. Comparisons are
-#:   done in integer-rational form (``den * score >= num * top``) so no
+#:   force the boundary to exactly 2. 1/3 sits under q06's second
+#:   expected answer in *both* measured catalogs -- 0.648 of the top
+#:   score against the real pilot corpus, and 0.435 in the
+#:   synthetic-only frozen corpus, where nothing dwarfs the average
+#:   note length, the tiny notes' term frequencies leave saturation,
+#:   and the same pair of notes drops toward its raw frequency ratio
+#:   -- while staying far above the strongest sparse non-answer
+#:   anywhere (0.025). 3/4 sits between r01's 0.698 and r02's second
+#:   expected answer at 0.865. Comparisons are done in
+#:   integer-rational form (``den * score >= num * top``) so no
 #:   derived float constant sits in the comparison path.
 _K1 = 3.0
 _CUTOFF_FLOOR_COVERAGE = 2
@@ -162,9 +169,11 @@ def query_response(
     re-derived in #66): an entry is served only when it matches at least
     ``min(_CUTOFF_FLOOR_COVERAGE, len(tokens))`` distinct query tokens
     and its score clears the top-relative bar for this query's candidate
-    field -- ``_CUTOFF_RATIO_SPARSE`` of the top score when at most
-    ``_SPARSE_CANDIDATE_MAX`` candidates pass the floor,
-    ``_CUTOFF_RATIO_CROWDED`` otherwise. Weak generic-token matches --
+    field -- a third of the top score (``_CUTOFF_RATIO_SPARSE_NUM /
+    _CUTOFF_RATIO_SPARSE_DEN``) when at most ``_SPARSE_CANDIDATE_MAX``
+    candidates pass the floor, three quarters
+    (``_CUTOFF_RATIO_CROWDED_NUM / _CUTOFF_RATIO_CROWDED_DEN``)
+    otherwise. Weak generic-token matches --
     score>0 was the only bar before #62 -- previously rode along in
     every response and dominated its token weight.
 
@@ -223,7 +232,17 @@ def _normalise(value: str) -> str:
 
 
 def _tokens(query: str) -> tuple[str, ...]:
-    return tuple(token for token in _normalise(query).split() if token)
+    """Normalised query tokens, deduplicated in first-seen order.
+
+    Duplicates collapse so repeating a word neither doubles its score
+    contribution nor counts twice toward the coverage floor -- Codex's
+    #68 round-1 review reproduced ``"needle needle missing"`` serving a
+    note that matched ``needle`` alone, because each repetition
+    incremented coverage past ``min(2, len(tokens))``. After
+    deduplication that query *is* the two-token query it asks about,
+    and a one-token match stays below its floor.
+    """
+    return tuple(dict.fromkeys(_normalise(query).split()))
 
 
 def _casefold_with_source_offsets(value: str) -> tuple[str, list[int]]:

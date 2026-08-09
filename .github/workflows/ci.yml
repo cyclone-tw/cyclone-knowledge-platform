@@ -84,6 +84,12 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: bash scripts/test-c3-mutations.sh
 
+      - name: Lexical scorer mutation matrix (#66)
+        if: matrix.python-version == '3.14'
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: bash scripts/test-scorer-mutations.sh
+
       - name: C6 mutation matrix
         if: matrix.python-version == '3.14'
         env:
