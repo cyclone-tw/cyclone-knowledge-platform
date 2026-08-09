@@ -22,7 +22,7 @@ content_sha256 = "fa967de6c81391e6ba0ab06f6c31e6f6e0056f9d9ea7b79be47e8c28609c8b
 
 [[note]]
 relative_path = "Core/procedure-agent-memory-read-scopes.md"
-content_sha256 = "aa1e17348b3fcdfe9a487bb7d033690411bdd2bb0d10a38178b028692b108f7a"
+content_sha256 = "1775a5f6f2a87f69cc480859adea740d9b257b4c6365df5f5a92cf341c2a1182"
 
 [[note]]
 relative_path = "Core/decision-cyclone-wiki-openwiki-role-boundary.md"

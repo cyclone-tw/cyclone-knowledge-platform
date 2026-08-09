@@ -25,28 +25,88 @@ from ckp.privacy import PrivacyGate
 _MAX_SNIPPET = 320
 _WHITESPACE = re.compile(r"\s+")
 
-#: Relevance cutoff (issue #62). Both bars are derived from the measured
-#: score distribution of the 16-question benchmark set against the real
-#: pilot corpus (per-result scores, coverage, and field decomposition are
-#: in #62), not picked by feel:
+#: Lexical scoring (issue #66) and relevance cutoff (issue #62 -> #66).
+#: Every constant below is pinned by the measured distribution of the
+#: 16-question benchmark set against the real pilot corpus (the per-result
+#: scores, coverage, and candidate counts are in #66's probe tables), not
+#: picked by feel. #62 proved with the same method that presence-based
+#: scoring cannot rank a small on-topic note above a large note that
+#: merely mentions every query token (its r05 inversion); this issue
+#: replaces the per-token presence points with a BM25F-family weighted
+#: term frequency, so that *how often* and *in how small a note* a token
+#: matches decides the score, while per-token matching itself stays
+#: substring containment (frozen; the real questions were written against
+#: that semantic -- r03 depends on a long Chinese token matching as one
+#: substring).
 #:
-#: * ``_CUTOFF_FLOOR``: every observed score-1 result was a single generic
-#:   token matching in one field (body or metadata) -- noise in all 16
-#:   distributions -- and no expected result anywhere scored below 2. The
-#:   floor is capped at the query's own token count: every benchmark
-#:   question has three or more tokens, so the measured "score 1 is noise"
-#:   claim is evidence about matching a small fraction of a longer query,
-#:   not about single-token queries, where a score-1 body match is full
-#:   coverage of everything the caller asked and must stay servable.
-#: * ``_CUTOFF_RATIO_*``: no expected result scored below 2/3 of its
-#:   question's top score, and the bound is tight -- the cross-note
-#:   question q06's second expected note sits at exactly 2 against a top
-#:   of 3, so any stricter ratio starts dropping correct answers. The
-#:   comparison is done in integers (``3 * score >= 2 * top``) so no
-#:   float rounding can move that boundary.
-_CUTOFF_FLOOR = 2
-_CUTOFF_RATIO_NUM = 2
-_CUTOFF_RATIO_DEN = 3
+#: * ``_K1`` (saturation): a token's weighted term frequency contributes
+#:   ``wtf * (k1+1) / (wtf + k1)`` -- repeated mentions help, with
+#:   diminishing returns, up to ``k1 + 1`` per token. The probe swept k1
+#:   over {0.5, 1.2, 2, 3, 4, 6, 8, 12, 16, 24, 48}: at 3.0 the binding
+#:   kill margin is widest (r01's densest sibling falls to 0.698 of the
+#:   top score; smaller k1 collapses scores back toward coverage counting
+#:   -- #62's proven-impossible family -- and larger k1 lets one dense
+#:   token dominate whole-query coverage, re-raising r05's siblings).
+#: * length normalization (the BM25 ``b``, folded in at its swept optimum
+#:   ``b = 1.0``): each field's term frequency is divided by
+#:   ``len(field) / avg len(field over this catalog)``, so a 3931-token
+#:   note that mentions everything once no longer outweighs a 904-token
+#:   note that is about the query. The averages are computed from the
+#:   already privacy-gated catalog of this request, never from a wider
+#:   corpus -- a scoring statistic over unadmitted notes would leak their
+#:   vocabulary into served rankings (#66 hard constraint).
+#: * IDF is deliberately absent, by measurement rather than principle
+#:   (#66 named it a candidate): on this corpus the tokens that separate
+#:   an expected note from its nearest sibling (r01's "note") are
+#:   corpus-common (low IDF) while tokens both share ("retrieval") are
+#:   rare, so IDF compresses exactly the gaps the cutoff needs -- every
+#:   swept (k1, b, idf=on) configuration had strictly worse binding
+#:   margins than its idf=off twin.
+#:
+#: The cutoff itself (issue #62's serving rule, re-derived on the new
+#: distribution as #66 requires):
+#:
+#: * ``_CUTOFF_FLOOR_COVERAGE``: a result must match at least
+#:   ``min(2, len(tokens))`` distinct query tokens. Same evidence as
+#:   #62's score floor -- every observed noise result was a single
+#:   generic-token match -- restated over coverage because BM25F scores
+#:   are no longer integer presence points. The cap at the query's own
+#:   token count keeps single-token queries servable (#62's scoped
+#:   gateway fixture: matching the only token asked for is full
+#:   coverage, not noise).
+#: * two-regime top-relative bar: #62 pinned a structural wall for any
+#:   single ratio -- q06's second expected answer must survive at 0.648
+#:   of the top score while r01's nearest non-answer must fall at 0.698,
+#:   and the non-answer is the stronger match on every per-result
+#:   relevance signal the probe measured (score ratio, coverage,
+#:   density, idf mass, token length). What distinguishes them is the
+#:   *candidate field*: q06 has ``2`` floor-passing candidates in the
+#:   whole catalog, r01 has ``6``. So the bar adapts to how contested
+#:   the query is: with at most ``_SPARSE_CANDIDATE_MAX`` candidates the
+#:   catalog itself says the topic is niche, and the runner-up is served
+#:   at half the top score (``_CUTOFF_RATIO_SPARSE``); in a crowded
+#:   field a result must hold three quarters of the top score
+#:   (``_CUTOFF_RATIO_CROWDED``) to justify its context tokens.
+#:   The measured distribution pins all three constants two-sidedly:
+#:   q06 (keep at 2 candidates) and r03 (kill its 0.544 sibling at 3)
+#:   force the boundary to exactly 2; 1/2 sits between r06's strongest
+#:   sparse non-answer (0.402) and q06's 0.648; 3/4 sits between r01's
+#:   0.698 and r02's second expected answer at 0.865. Comparisons are
+#:   done in integer-rational form (``den * score >= num * top``) so no
+#:   derived float constant sits in the comparison path.
+_K1 = 3.0
+_CUTOFF_FLOOR_COVERAGE = 2
+_SPARSE_CANDIDATE_MAX = 2
+_CUTOFF_RATIO_SPARSE_NUM = 1
+_CUTOFF_RATIO_SPARSE_DEN = 3
+_CUTOFF_RATIO_CROWDED_NUM = 3
+_CUTOFF_RATIO_CROWDED_DEN = 4
+
+#: Scored fields and their weights (unchanged from the presence scorer:
+#: title 4, description 2, metadata 2, body 1) -- #66 moves the
+#: aggregation under them from presence points to weighted term
+#: frequency; it does not reweigh the fields.
+_FIELD_WEIGHTS = (4.0, 2.0, 2.0, 1.0)
 
 
 class GatewayPolicyError(ValueError):
@@ -91,34 +151,51 @@ def query_response(
 ) -> QueryResponse:
     """Rank one already privacy-gated Catalog and add bound citations.
 
-    Scored entries pass a relevance cutoff before pagination (issue #62):
-    an entry is served only when its score clears both the absolute floor
-    (``_CUTOFF_FLOOR``) and the top-relative bar (``_CUTOFF_RATIO_NUM /
-    _CUTOFF_RATIO_DEN`` of the highest score for this query). Weak
-    generic-token matches -- score>0 was the only bar before -- previously
-    rode along in every response and dominated its token weight.
+    Ranking is the BM25F-family weighted-term-frequency score derived in
+    issue #66 (see the scoring constants above): per-token substring
+    matching is unchanged, but repeated mentions in a small note now
+    outrank single mentions in a large one, which is what lets the
+    serving cutoff below separate "the note about the query" from "a
+    note that mentions every query word".
+
+    Scored entries pass a relevance cutoff before pagination (#62,
+    re-derived in #66): an entry is served only when it matches at least
+    ``min(_CUTOFF_FLOOR_COVERAGE, len(tokens))`` distinct query tokens
+    and its score clears the top-relative bar for this query's candidate
+    field -- ``_CUTOFF_RATIO_SPARSE`` of the top score when at most
+    ``_SPARSE_CANDIDATE_MAX`` candidates pass the floor,
+    ``_CUTOFF_RATIO_CROWDED`` otherwise. Weak generic-token matches --
+    score>0 was the only bar before #62 -- previously rode along in
+    every response and dominated its token weight.
 
     ``total`` counts the results that survive the cutoff, not the raw
-    score>0 match count: it is the number of results a caller could
-    actually page through with ``limit``/``offset``-style requests, and a
-    served relevance policy that hides a result from every page must not
-    still advertise it in the count.
+    match count: it is the number of results a caller could actually
+    page through with ``limit``/``offset``-style requests, and a served
+    relevance policy that hides a result from every page must not still
+    advertise it in the count (#62).
     """
     tokens = _tokens(request.query)
-    scored = [
-        (score, entry)
-        for entry in catalog.entries
-        if (score := _score(entry, tokens)) > 0
-    ]
+    entry_fields = [(entry, _entry_fields(entry)) for entry in catalog.entries]
+    averages = _field_averages([fields for _, fields in entry_fields])
+    floor = min(_CUTOFF_FLOOR_COVERAGE, len(tokens))
+    scored = []
+    for entry, fields in entry_fields:
+        score, coverage = _score(fields, tokens, averages)
+        if score > 0 and coverage >= floor:
+            scored.append((score, entry))
     scored.sort(key=lambda item: (-item[0], item[1].concept_id))
     if scored:
         top_score = scored[0][0]
-        floor = min(_CUTOFF_FLOOR, len(tokens))
+        if len(scored) <= _SPARSE_CANDIDATE_MAX:
+            ratio_num = _CUTOFF_RATIO_SPARSE_NUM
+            ratio_den = _CUTOFF_RATIO_SPARSE_DEN
+        else:
+            ratio_num = _CUTOFF_RATIO_CROWDED_NUM
+            ratio_den = _CUTOFF_RATIO_CROWDED_DEN
         scored = [
             (score, entry)
             for score, entry in scored
-            if score >= floor
-            and _CUTOFF_RATIO_DEN * score >= _CUTOFF_RATIO_NUM * top_score
+            if ratio_den * score >= ratio_num * top_score
         ]
     total = len(scored)
     results = [
@@ -196,32 +273,77 @@ def _facet(values: list[str | None]) -> list[FacetBucket]:
     return [FacetBucket(value=value, count=counts[value]) for value in sorted(counts)]
 
 
-def _score(entry: CatalogEntry, tokens: tuple[str, ...]) -> int:
-    title = _normalise(entry.title or "")
-    description = _normalise(entry.description or "")
-    metadata = _normalise(
-        " ".join(
-            value
-            for value in (
-                entry.type,
-                entry.content_category,
-                *(entry.tags or ()),
+def _entry_fields(entry: CatalogEntry) -> tuple[str, str, str, str]:
+    """The four scored fields, normalised, in ``_FIELD_WEIGHTS`` order."""
+    return (
+        _normalise(entry.title or ""),
+        _normalise(entry.description or ""),
+        _normalise(
+            " ".join(
+                value
+                for value in (
+                    entry.type,
+                    entry.content_category,
+                    *(entry.tags or ()),
+                )
+                if value is not None
             )
-            if value is not None
-        )
+        ),
+        _normalise(entry.body),
     )
-    body = _normalise(entry.body)
-    score = 0
+
+
+def _field_averages(
+    fields_list: list[tuple[str, str, str, str]],
+) -> tuple[float, ...]:
+    """Mean normalised length per field over this request's catalog.
+
+    This is the length-normalization yardstick (the scoring constants'
+    ``b = 1.0`` note): computed from the already privacy-gated catalog
+    only, per request, so no statistic about unadmitted notes can reach
+    a served score.
+    """
+    if not fields_list:
+        return (0.0,) * len(_FIELD_WEIGHTS)
+    count = len(fields_list)
+    return tuple(
+        sum(len(fields[index]) for fields in fields_list) / count
+        for index in range(len(_FIELD_WEIGHTS))
+    )
+
+
+def _score(
+    fields: tuple[str, str, str, str],
+    tokens: tuple[str, ...],
+    averages: tuple[float, ...],
+) -> tuple[float, int]:
+    """One entry's BM25F-family score and its distinct-token coverage.
+
+    Per token: each field contributes its substring-occurrence count,
+    weighted by the field's weight and divided by the field's relative
+    length (``len / avg len``, the ``b = 1.0`` normalization -- a field
+    can only reach ``avg > 0`` when some entry, possibly this one, has
+    content, so a positive count never divides by zero); the summed
+    weighted term frequency then saturates as ``wtf * (k1+1) / (wtf +
+    k1)``. Matching stays substring containment: a token counts exactly
+    when the old presence scorer would have matched it (``count > 0``
+    iff ``token in field``).
+    """
+    score = 0.0
+    coverage = 0
     for token in tokens:
-        if token in title:
-            score += 4
-        if token in description:
-            score += 2
-        if token in metadata:
-            score += 2
-        if token in body:
-            score += 1
-    return score
+        weighted_tf = 0.0
+        for field_text, weight, average in zip(
+            fields, _FIELD_WEIGHTS, averages, strict=True
+        ):
+            occurrences = field_text.count(token)
+            if not occurrences:
+                continue
+            weighted_tf += weight * occurrences * average / len(field_text)
+        if weighted_tf > 0:
+            coverage += 1
+            score += weighted_tf * (_K1 + 1.0) / (weighted_tf + _K1)
+    return score, coverage
 
 
 def _snippet(body: str, tokens: tuple[str, ...]) -> str:
