@@ -79,7 +79,7 @@ class QueryResultResponse(BaseModel):
     id: str | None
     title: str | None
     type: str | None
-    score: int
+    score: float
     snippet: str = Field(max_length=320)
     citation: CitationResponse
 
