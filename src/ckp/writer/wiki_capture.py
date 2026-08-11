@@ -15,6 +15,7 @@ import tempfile
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from uuid import RFC_4122, UUID
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
@@ -44,7 +45,7 @@ _FIXED_WRAPPER_ARGUMENTS = (
     "--git-mode",
     "auto",
 )
-_RECEIPT_KEYS = frozenset(
+_RECEIPT_BASE_KEYS = frozenset(
     {
         "wiki_capture_path",
         "wiki_capture_status",
@@ -52,6 +53,37 @@ _RECEIPT_KEYS = frozenset(
         "wiki_capture_git_mode",
     }
 )
+_RECEIPT_V3_KEYS = frozenset(
+    {
+        "wiki_capture_contract",
+        "wiki_capture_id",
+        "wiki_capture_concept_id",
+        "wiki_capture_request_id",
+    }
+)
+_RECEIPT_V3_COMPLETION_KEYS = frozenset(
+    {
+        "wiki_capture_path",
+        "wiki_capture_status",
+        "wiki_capture_surface",
+        "wiki_capture_git_mode",
+        "wiki_capture_contract",
+        "wiki_capture_id",
+        "wiki_capture_concept_id",
+    }
+)
+_RECEIPT_V3_PLANNED_KEYS = frozenset(
+    {
+        "wiki_capture_path",
+        "wiki_capture_status",
+        "wiki_capture_surface",
+        "wiki_capture_git_mode",
+        "wiki_capture_contract",
+        "wiki_capture_concept_id",
+    }
+)
+_RECEIPT_KEYS = frozenset(_RECEIPT_BASE_KEYS | _RECEIPT_V3_KEYS)
+_RECEIPT_GIT_MODES = frozenset({"direct", "isolated"})
 
 
 class WikiCaptureErrorCode(StrEnum):
@@ -123,6 +155,20 @@ class CoreInboxCaptureReceipt(BaseModel):
     path: str
     surface: str
     git_mode: str
+    wiki_capture_contract: int | None = None
+    wiki_capture_id: str | None = None
+    wiki_capture_concept_id: str | None = None
+
+    def model_dump(self, *args, **kwargs):  # type: ignore[override]
+        values = super().model_dump(*args, **kwargs)
+        for key in (
+            "wiki_capture_contract",
+            "wiki_capture_id",
+            "wiki_capture_concept_id",
+        ):
+            if values.get(key) is None:
+                values.pop(key, None)
+        return values
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,26 +305,97 @@ def _parse_receipt(
         if not separator or key not in _RECEIPT_KEYS or key in values:
             raise WikiCaptureRefusal(WikiCaptureErrorCode.RECEIPT_INVALID)
         values[key] = value
-    if set(values) != _RECEIPT_KEYS:
+
+    if "wiki_capture_request_id" in values:
         raise WikiCaptureRefusal(WikiCaptureErrorCode.RECEIPT_INVALID)
 
-    status = values["wiki_capture_status"]
-    expected_statuses = {"planned"} if dry_run else {"created"}
-    match = _CAPTURE_PATH.fullmatch(values["wiki_capture_path"])
-    if (
-        status not in expected_statuses
-        or values["wiki_capture_surface"] != "core"
-        or values["wiki_capture_git_mode"] not in {"direct", "isolated"}
-        or match is None
-        or match.group("slug") != slug
-    ):
+    is_v3_completion = set(values) == _RECEIPT_V3_COMPLETION_KEYS
+    is_v3_planned = set(values) == _RECEIPT_V3_PLANNED_KEYS
+    if set(values) == _RECEIPT_BASE_KEYS:
+        is_v3 = False
+    elif is_v3_completion or is_v3_planned:
+        is_v3 = True
+    else:
         raise WikiCaptureRefusal(WikiCaptureErrorCode.RECEIPT_INVALID)
+    if is_v3:
+        if values["wiki_capture_contract"] != "3":
+            raise WikiCaptureRefusal(WikiCaptureErrorCode.RECEIPT_INVALID)
+        if dry_run and is_v3_completion:
+            raise WikiCaptureRefusal(WikiCaptureErrorCode.RECEIPT_INVALID)
+
+    status = values["wiki_capture_status"]
+    expected_status = {"planned"} if dry_run else {"created"}
+    if status not in expected_status or (is_v3_planned and status != "planned"):
+        raise WikiCaptureRefusal(WikiCaptureErrorCode.RECEIPT_INVALID)
+    if not is_v3 and dry_run and status != "planned":
+        raise WikiCaptureRefusal(WikiCaptureErrorCode.RECEIPT_INVALID)
+
+    path = values["wiki_capture_path"]
+    concept = values["wiki_capture_concept_id"] if is_v3 else None
+
+    if values["wiki_capture_surface"] != "core":
+        raise WikiCaptureRefusal(WikiCaptureErrorCode.RECEIPT_INVALID)
+    if values["wiki_capture_git_mode"] not in _RECEIPT_GIT_MODES:
+        raise WikiCaptureRefusal(WikiCaptureErrorCode.RECEIPT_INVALID)
+
+    path_match = _CAPTURE_PATH.fullmatch(path)
+    if path_match is None or path_match.group("slug") != slug:
+        raise WikiCaptureRefusal(WikiCaptureErrorCode.RECEIPT_INVALID)
+
+    if not is_v3 and concept is not None:
+        raise WikiCaptureRefusal(WikiCaptureErrorCode.RECEIPT_INVALID)
+
+    if concept is not None:
+        if concept.endswith(".md"):
+            raise WikiCaptureRefusal(WikiCaptureErrorCode.RECEIPT_INVALID)
+        if path[:-3] != concept:
+            raise WikiCaptureRefusal(WikiCaptureErrorCode.RECEIPT_INVALID)
+
+    if not is_v3:
+        return CoreInboxCaptureReceipt(
+            request_id=request_id,
+            status=status,
+            path=path,
+            surface="core",
+            git_mode=values["wiki_capture_git_mode"],
+        )
+
+    if is_v3_planned and "wiki_capture_id" in values:
+        raise WikiCaptureRefusal(WikiCaptureErrorCode.RECEIPT_INVALID)
+
+    if not is_v3_planned:
+        if "wiki_capture_id" not in values:
+            raise WikiCaptureRefusal(WikiCaptureErrorCode.RECEIPT_INVALID)
+        wiki_capture_id = values["wiki_capture_id"]
+        try:
+            parsed = UUID(wiki_capture_id)
+        except ValueError as exc:
+            raise WikiCaptureRefusal(WikiCaptureErrorCode.RECEIPT_INVALID) from exc
+        if str(parsed) != wiki_capture_id:
+            raise WikiCaptureRefusal(WikiCaptureErrorCode.RECEIPT_INVALID)
+        if parsed.version != 7 or parsed.variant != RFC_4122:
+            raise WikiCaptureRefusal(WikiCaptureErrorCode.RECEIPT_INVALID)
+
+        return CoreInboxCaptureReceipt(
+            request_id=request_id,
+            status=status,
+            path=path,
+            surface="core",
+            git_mode=values["wiki_capture_git_mode"],
+            wiki_capture_contract=3,
+            wiki_capture_id=wiki_capture_id,
+            wiki_capture_concept_id=path[:-3],
+        )
+
     return CoreInboxCaptureReceipt(
         request_id=request_id,
         status=status,
-        path=values["wiki_capture_path"],
+        path=path,
         surface="core",
         git_mode=values["wiki_capture_git_mode"],
+        wiki_capture_contract=3,
+        wiki_capture_id=None,
+        wiki_capture_concept_id=path[:-3],
     )
 
 

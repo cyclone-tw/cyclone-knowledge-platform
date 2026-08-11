@@ -4,6 +4,7 @@ import hashlib
 import json
 import stat
 from pathlib import Path
+from uuid import RFC_4122, UUID
 
 import pytest
 
@@ -60,6 +61,25 @@ root = Path(os.environ["CYCLONE_WIKI_ROOT"])
 )
 
 mode = os.environ.get("FAKE_WRAPPER_MODE", "success")
+valid_uuid = "0193f3fe-3c2c-7c4d-a7b5-c98cf8ecb7f4"
+slug = values["--slug"]
+path = f"Core/_inbox/agent-captures/2026-08-04-{slug}.md"
+status = "planned" if "--dry-run" in flags else "created"
+surface = "core"
+concept_id = f"Core/_inbox/agent-captures/2026-08-04-{slug}"
+
+def emit_v3_receipt(
+    wiki_capture_id: str | None,
+    concept_value: str,
+    include_request_id: bool,
+) -> None:
+    print("wiki_capture_contract=3")
+    if wiki_capture_id is not None:
+        print(f"wiki_capture_id={wiki_capture_id}")
+    print(f"wiki_capture_concept_id={concept_value}")
+    if include_request_id:
+        print("wiki_capture_request_id=request-wiki-1")
+
 if mode == "freeze":
     print("wiki_capture_status=rejected")
     print("wiki_capture_error=wiki-write-frozen")
@@ -68,10 +88,52 @@ if mode == "failure":
     print("sensitive diagnostic deliberately discarded")
     raise SystemExit(1)
 
-slug = values["--slug"]
-path = f"Core/_inbox/agent-captures/2026-08-04-{slug}.md"
-surface = "core"
-status = "planned" if "--dry-run" in flags else "created"
+if mode == "v3-valid":
+    emit_v3_receipt(valid_uuid, concept_id, include_request_id=False)
+
+if mode == "v3-dry-run-leak-id":
+    emit_v3_receipt(valid_uuid, concept_id, include_request_id=False)
+
+if mode == "v3-dry-run-leak-request-id":
+    emit_v3_receipt(None, concept_id, include_request_id=True)
+
+if mode == "v3-dry-run-locators":
+    print("wiki_capture_contract=3")
+    print(f"wiki_capture_concept_id={concept_id}")
+
+if mode == "v3-missing-uuid":
+    emit_v3_receipt(None, concept_id, include_request_id=False)
+
+if mode == "v3-invalid-uuid":
+    emit_v3_receipt("not-a-uuid", concept_id, include_request_id=False)
+
+if mode == "v3-uppercase-uuid":
+    emit_v3_receipt(valid_uuid.upper(), concept_id, include_request_id=False)
+
+if mode == "v3-wrong-version":
+    emit_v3_receipt(
+        "0193f3fe-3c2c-4c4d-a7b5-c98cf8ecb7f4",
+        concept_id,
+        include_request_id=False,
+    )
+
+if mode == "v3-wrong-variant":
+    emit_v3_receipt(
+        "0193f3fe-3c2c-7c4d-77b5-c98cf8ecb7f4",
+        concept_id,
+        include_request_id=False,
+    )
+
+if mode == "v3-missing-surface":
+    emit_v3_receipt(valid_uuid, concept_id, include_request_id=False)
+
+if mode == "v3-concept-mismatch":
+    emit_v3_receipt(valid_uuid, f"{concept_id}-mismatch", include_request_id=False)
+
+if mode == "v3-unknown-key":
+    emit_v3_receipt(valid_uuid, concept_id, include_request_id=False)
+    print("wiki_capture_unknown_key=unexpected")
+
 if mode == "existing":
     status = "existing"
 if mode == "private":
@@ -84,7 +146,8 @@ print(f"wiki_capture_path={path}")
 print(f"wiki_capture_status={status}")
 if mode == "duplicate":
     print(f"wiki_capture_status={status}")
-print(f"wiki_capture_surface={surface}")
+if mode != "v3-missing-surface":
+    print(f"wiki_capture_surface={surface}")
 print("wiki_capture_git_mode=isolated")
 """
 
@@ -376,3 +439,154 @@ def test_wrapper_path_must_be_a_physical_executable(
         CoreInboxCaptureAdapter(wiki_root, state_root, _registry("codex"))
 
     assert caught.value.code is WikiCaptureErrorCode.WRAPPER_UNAVAILABLE
+
+
+def test_v3_valid_receipt_is_serialized_in_public_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wiki_root, state_root = _fixture_roots(tmp_path)
+    registry = _registry("codex")
+    monkeypatch.setenv("FAKE_WRAPPER_MODE", "v3-valid")
+
+    receipt = CoreInboxCaptureAdapter(wiki_root, state_root, registry).capture(
+        _request("c7-wiki-v3"),
+        _context(registry),
+    )
+
+    assert receipt.model_dump() == {
+        "request_id": "request-wiki-1",
+        "status": "created",
+        "path": "Core/_inbox/agent-captures/2026-08-04-c7-wiki-v3.md",
+        "surface": "core",
+        "git_mode": "isolated",
+        "wiki_capture_contract": 3,
+        "wiki_capture_id": "0193f3fe-3c2c-7c4d-a7b5-c98cf8ecb7f4",
+        "wiki_capture_concept_id": "Core/_inbox/agent-captures/2026-08-04-c7-wiki-v3",
+    }
+
+    parsed = UUID(receipt.model_dump()["wiki_capture_id"])
+    assert str(parsed) == "0193f3fe-3c2c-7c4d-a7b5-c98cf8ecb7f4"
+    assert parsed.version == 7
+    assert parsed.variant == RFC_4122
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "v3-missing-uuid",
+        "v3-invalid-uuid",
+        "v3-uppercase-uuid",
+        "v3-wrong-version",
+        "v3-wrong-variant",
+    ],
+)
+def test_v3_receipt_uuid_is_required_and_valid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    wiki_root, state_root = _fixture_roots(tmp_path)
+    registry = _registry("codex")
+    monkeypatch.setenv("FAKE_WRAPPER_MODE", mode)
+
+    with pytest.raises(WikiCaptureRefusal) as caught:
+        CoreInboxCaptureAdapter(wiki_root, state_root, registry).capture(
+            _request("c7-wiki-v3"),
+            _context(registry),
+        )
+
+    assert caught.value.code is WikiCaptureErrorCode.RECEIPT_INVALID
+    assert (wiki_root / "wrapper-invocation.json").exists()
+
+
+def test_v3_concept_mismatch_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wiki_root, state_root = _fixture_roots(tmp_path)
+    registry = _registry("codex")
+    monkeypatch.setenv("FAKE_WRAPPER_MODE", "v3-concept-mismatch")
+
+    with pytest.raises(WikiCaptureRefusal) as caught:
+        CoreInboxCaptureAdapter(wiki_root, state_root, registry).capture(
+            _request("c7-wiki-v3"),
+            _context(registry),
+        )
+
+    assert caught.value.code is WikiCaptureErrorCode.RECEIPT_INVALID
+    assert list(state_root.iterdir()) == []
+
+
+def test_unknown_wiki_capture_keys_are_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wiki_root, state_root = _fixture_roots(tmp_path)
+    registry = _registry("codex")
+    monkeypatch.setenv("FAKE_WRAPPER_MODE", "v3-unknown-key")
+
+    with pytest.raises(WikiCaptureRefusal) as caught:
+        CoreInboxCaptureAdapter(wiki_root, state_root, registry).capture(
+            _request("c7-wiki-v3"),
+            _context(registry),
+        )
+
+    assert caught.value.code is WikiCaptureErrorCode.RECEIPT_INVALID
+    assert list(state_root.iterdir()) == []
+
+
+def test_v3_missing_base_key_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wiki_root, state_root = _fixture_roots(tmp_path)
+    registry = _registry("codex")
+    monkeypatch.setenv("FAKE_WRAPPER_MODE", "v3-missing-surface")
+
+    with pytest.raises(WikiCaptureRefusal) as caught:
+        CoreInboxCaptureAdapter(wiki_root, state_root, registry).capture(
+            _request("c7-wiki-v3"),
+            _context(registry),
+        )
+
+    assert caught.value.code is WikiCaptureErrorCode.RECEIPT_INVALID
+
+
+@pytest.mark.parametrize("mode", ["v3-dry-run-leak-id", "v3-dry-run-leak-request-id"])
+def test_dry_run_cannot_leak_completion_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    wiki_root, state_root = _fixture_roots(tmp_path)
+    registry = _registry("codex")
+    monkeypatch.setenv("FAKE_WRAPPER_MODE", mode)
+
+    with pytest.raises(WikiCaptureRefusal) as caught:
+        CoreInboxCaptureAdapter(wiki_root, state_root, registry).capture(
+            _request("c7-wiki-v3-dry-run"),
+            _context(registry),
+            dry_run=True,
+        )
+
+    assert caught.value.code is WikiCaptureErrorCode.RECEIPT_INVALID
+    assert (wiki_root / "wrapper-invocation.json").exists()
+
+
+def test_dry_run_keeps_legacy_planned_when_only_noncompletion_locators_present(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wiki_root, state_root = _fixture_roots(tmp_path)
+    registry = _registry("codex")
+    monkeypatch.setenv("FAKE_WRAPPER_MODE", "v3-dry-run-locators")
+
+    receipt = CoreInboxCaptureAdapter(wiki_root, state_root, registry).capture(
+        _request("c7-wiki-v3-dry-run"),
+        _context(registry),
+        dry_run=True,
+    )
+
+    assert receipt.status == "planned"
+    assert (
+        receipt.model_dump()["path"]
+        == "Core/_inbox/agent-captures/2026-08-04-c7-wiki-v3-dry-run.md"
+    )
