@@ -129,7 +129,10 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: bash scripts/test-c5-mutations.sh
 
-      - name: Issue #25 semantic-provider mutation matrix
+      # Quoted because YAML starts a comment at " #": unquoted, this name
+      # parsed as "Issue" and the rest was discarded, so the step showed up as
+      # a bare "Issue" in the Actions UI and API (#73).
+      - name: "Issue #25 semantic-provider mutation matrix"
         if: matrix.python-version == '3.14' && github.event_name == 'pull_request'
         env:
           PYTHONDONTWRITEBYTECODE: "1"
