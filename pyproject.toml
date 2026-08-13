@@ -1,11 +1,16 @@
 [build-system]
-requires = ["setuptools>=68"]
+# >=77 是硬需求，不是保守估計：PEP 639 的 `license = "MIT"` 字串形式與
+# `license-files` 在 setuptools 76 會直接 ValueError（實測），77 才接受並把
+# LICENSE 收進 dist-info。
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "cyclone-knowledge-platform"
 version = "0.2.0"
-description = "Private Knowledge Platform for the Cyclone-Wiki OKF migration"
+license = "MIT"
+license-files = ["LICENSE"]
+description = "Self-hosted knowledge platform for the Cyclone-Wiki OKF migration"
 requires-python = ">=3.12"
 dependencies = [
   # The Gateway (Epic #1 / C3) will serve from this same app, so the skeleton

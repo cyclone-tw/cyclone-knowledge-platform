@@ -1,6 +1,6 @@
 # cyclone-knowledge-platform
 
-Private Knowledge Platform for the Cyclone-Wiki OKF migration.
+Self-hosted knowledge platform for the Cyclone-Wiki OKF migration.
 Phase 3 of `cyclone-tw/cyclone-wiki#142`.
 
 **Agents: read [`AGENTS.md`](AGENTS.md) first.**
