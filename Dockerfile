@@ -17,7 +17,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY pyproject.toml README.md ./
+# LICENSE travels with pyproject because `license-files` declares it: without
+# it the wheel builds fine and METADATA still says License-Expression: MIT,
+# but dist-info/licenses/ comes out empty, so the image would ship under MIT
+# without carrying the notice MIT itself requires (#75 review round 1).
+COPY pyproject.toml README.md LICENSE ./
 COPY src/ ./src/
 COPY fixtures/ ./fixtures/
 
