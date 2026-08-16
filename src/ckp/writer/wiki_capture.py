@@ -41,7 +41,7 @@ _FIXED_WRAPPER_ARGUMENTS = (
     "--surface",
     "core",
     "--content-category",
-    "engineering",
+    "development",
     "--git-mode",
     "auto",
 )

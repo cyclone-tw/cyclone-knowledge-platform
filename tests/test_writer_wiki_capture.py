@@ -235,7 +235,7 @@ def test_adapter_fixes_route_and_cleans_private_body_file(tmp_path: Path) -> Non
         "--surface",
         "core",
         "--content-category",
-        "engineering",
+        "development",
         "--git-mode",
         "auto",
     ]
