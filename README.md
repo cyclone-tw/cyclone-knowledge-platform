@@ -53,6 +53,24 @@ Container, including the endpoint smoke test:
 bash scripts/smoke-container.sh
 ```
 
+## Mac mini runtime (issue #78)
+
+A persistent Gateway on the Mac mini runs as a login-session LaunchAgent,
+following the Cyclone-Dashboard deploy pattern:
+
+```bash
+./deploy/install-launchd.sh      # venv + env file + plist, then health check
+./deploy/update.sh               # pull origin/main, reinstall, restart, verify
+```
+
+Host-specific values live in `~/.config/cyclone/ckp-gateway.env` (created on
+first install; only valid `CKP_<SECTION>_<KEY>` names may appear there). The
+default binding is loopback (`127.0.0.1:8092`) with the bundle root pointed at
+the machine's real `cyclone-wiki` checkout. Note the anonymous read surface
+serves `privacy: public` notes only, so a real-wiki catalog stays empty until
+a scoped composition exists — `/health` and `/revision` are the meaningful
+smoke endpoints for this runtime.
+
 ## Local Core inbox bridge
 
 `ckp-wiki-capture` delegates one authenticated, create-only capture to
