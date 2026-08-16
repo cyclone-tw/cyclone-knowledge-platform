@@ -20,10 +20,19 @@ mkdir -p "$LOG_DIR" "$HOME/Library/LaunchAgents" "$(dirname "$ENV_FILE")"
 
 if [[ ! -x "$REPO_DIR/.venv/bin/python" ]]; then
   echo "==> creating venv"
-  python3 -m venv "$REPO_DIR/.venv"
+  # Homebrew python's ensurepip is broken on some hosts; fall back to uv.
+  if ! python3 -m venv "$REPO_DIR/.venv" 2>/dev/null; then
+    rm -rf "$REPO_DIR/.venv"
+    command -v uv >/dev/null 2>&1 || { echo "!! python3 -m venv failed and uv is not installed" >&2; exit 1; }
+    uv venv "$REPO_DIR/.venv"
+  fi
 fi
 echo "==> installing ckp (editable, runtime deps only)"
-"$REPO_DIR/.venv/bin/pip" install --quiet -e "$REPO_DIR"
+if [[ -x "$REPO_DIR/.venv/bin/pip" ]]; then
+  "$REPO_DIR/.venv/bin/pip" install --quiet -e "$REPO_DIR"
+else
+  uv pip install --quiet --python "$REPO_DIR/.venv/bin/python" -e "$REPO_DIR"
+fi
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "==> writing default env file: $ENV_FILE"

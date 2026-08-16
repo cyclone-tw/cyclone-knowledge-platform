@@ -19,7 +19,11 @@ PREV="$(git rev-parse HEAD)"
 git pull --ff-only
 echo "==> $PREV -> $(git rev-parse HEAD)"
 
-"$REPO_DIR/.venv/bin/pip" install --quiet -e "$REPO_DIR"
+if [[ -x "$REPO_DIR/.venv/bin/pip" ]]; then
+  "$REPO_DIR/.venv/bin/pip" install --quiet -e "$REPO_DIR"
+else
+  uv pip install --quiet --python "$REPO_DIR/.venv/bin/python" -e "$REPO_DIR"
+fi
 
 launchctl kickstart -k "$GUI_DOMAIN/$LABEL"
 
