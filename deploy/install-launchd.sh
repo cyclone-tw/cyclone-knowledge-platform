@@ -21,6 +21,8 @@ TEMPLATE="$REPO_DIR/deploy/$LABEL.plist.template"
 for p in "$REPO_DIR" "$LOG_DIR"; do
   [[ "$p" =~ ^[A-Za-z0-9/._-]+$ ]] || { echo "!! unsafe characters in path: $p" >&2; exit 1; }
 done
+# PORT lands in a sourced env file; only a plain port number is acceptable.
+[[ "$PORT" =~ ^[0-9]{1,5}$ ]] || { echo "!! PORT must be numeric: $PORT" >&2; exit 1; }
 
 mkdir -p "$LOG_DIR" "$HOME/Library/LaunchAgents" "$(dirname "$ENV_FILE")"
 
