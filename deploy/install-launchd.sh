@@ -64,11 +64,6 @@ sed -e "s|__REPO_DIR__|$REPO_DIR|g" \
     -e "s|__LOG_DIR__|$LOG_DIR|g" \
     "$TEMPLATE" > "$PLIST_PATH"
 
-GUI_DOMAIN="gui/$(id -u)"
-launchctl bootout "$GUI_DOMAIN" "$PLIST_PATH" 2>/dev/null || true
-launchctl bootstrap "$GUI_DOMAIN" "$PLIST_PATH"
-launchctl kickstart -k "$GUI_DOMAIN/$LABEL"
-
 # The env file owns the real port; resolve it exactly the way the LaunchAgent
 # does (set -a + source). This deployment requires the port to come from
 # CKP_SERVER_PORT in the env file — a missing value or a CKP_CONFIG_FILE
@@ -82,6 +77,12 @@ if [[ "$HEALTH_PORT" == "config-file" ]]; then
 fi
 [[ "$HEALTH_PORT" =~ ^[0-9]{1,5}$ ]] && (( HEALTH_PORT >= 1 && HEALTH_PORT <= 65535 )) \
   || { echo "!! $ENV_FILE must define CKP_SERVER_PORT (1-65535); got: ${HEALTH_PORT:-<empty>}" >&2; exit 1; }
+
+GUI_DOMAIN="gui/$(id -u)"
+launchctl bootout "$GUI_DOMAIN" "$PLIST_PATH" 2>/dev/null || true
+launchctl bootstrap "$GUI_DOMAIN" "$PLIST_PATH"
+launchctl kickstart -k "$GUI_DOMAIN/$LABEL"
+
 echo "==> waiting for /health on 127.0.0.1:$HEALTH_PORT"
 for _ in $(seq 1 30); do
   if curl -sf --connect-timeout 2 --max-time 5 "http://127.0.0.1:$HEALTH_PORT/health" >/dev/null 2>&1; then
