@@ -67,9 +67,9 @@ Host-specific values live in `~/.config/cyclone/ckp-gateway.env` (created on
 first install; only valid `CKP_<SECTION>_<KEY>` names may appear there). The
 default binding is loopback (`127.0.0.1:8092`) with the bundle root pointed at
 the machine's real `cyclone-wiki` checkout. Note the anonymous read surface
-serves `privacy: public` notes only, so a real-wiki catalog stays empty until
-a scoped composition exists — `/health` and `/revision` are the meaningful
-smoke endpoints for this runtime.
+serves `privacy: public` notes only; the current wiki corpus has no public
+formal notes, so its catalog lists nothing today — `/health` and `/revision`
+are the meaningful smoke endpoints for this runtime.
 
 ## Local Core inbox bridge
 

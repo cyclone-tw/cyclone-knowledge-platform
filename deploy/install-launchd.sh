@@ -16,6 +16,12 @@ ENV_FILE="$HOME/.config/cyclone/ckp-gateway.env"
 PLIST_PATH="$HOME/Library/LaunchAgents/$LABEL.plist"
 TEMPLATE="$REPO_DIR/deploy/$LABEL.plist.template"
 
+# Both paths are injected into the plist XML via sed; refuse characters that
+# would corrupt the XML, the sed replacement, or the embedded shell command.
+for p in "$REPO_DIR" "$LOG_DIR"; do
+  [[ "$p" =~ ^[A-Za-z0-9/._-]+$ ]] || { echo "!! unsafe characters in path: $p" >&2; exit 1; }
+done
+
 mkdir -p "$LOG_DIR" "$HOME/Library/LaunchAgents" "$(dirname "$ENV_FILE")"
 
 if [[ ! -x "$REPO_DIR/.venv/bin/python" ]]; then
@@ -60,13 +66,13 @@ launchctl bootout "$GUI_DOMAIN" "$PLIST_PATH" 2>/dev/null || true
 launchctl bootstrap "$GUI_DOMAIN" "$PLIST_PATH"
 launchctl kickstart -k "$GUI_DOMAIN/$LABEL"
 
-# The env file owns the real port; read it back for the health probe.
-HEALTH_PORT="$(sed -n 's/^CKP_SERVER_PORT=//p' "$ENV_FILE" | tail -1)"
-HEALTH_PORT="${HEALTH_PORT:-$PORT}"
+# The env file owns the real port; resolve it exactly the way the LaunchAgent
+# does (set -a + source), so export/quoted forms all parse correctly.
+HEALTH_PORT="$(set -a; . "$ENV_FILE" >/dev/null 2>&1; set +a; printf '%s' "${CKP_SERVER_PORT:-$PORT}")"
 echo "==> waiting for /health on 127.0.0.1:$HEALTH_PORT"
 for _ in $(seq 1 30); do
-  if curl -sf "http://127.0.0.1:$HEALTH_PORT/health" >/dev/null 2>&1; then
-    curl -s "http://127.0.0.1:$HEALTH_PORT/health"
+  if curl -sf --connect-timeout 2 --max-time 5 "http://127.0.0.1:$HEALTH_PORT/health" >/dev/null 2>&1; then
+    curl -s --connect-timeout 2 --max-time 5 "http://127.0.0.1:$HEALTH_PORT/health"
     echo
     echo "==> installed: $GUI_DOMAIN/$LABEL (logs in $LOG_DIR)"
     exit 0

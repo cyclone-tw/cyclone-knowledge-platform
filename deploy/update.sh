@@ -27,12 +27,13 @@ fi
 
 launchctl kickstart -k "$GUI_DOMAIN/$LABEL"
 
-PORT="$(sed -n 's/^CKP_SERVER_PORT=//p' "$ENV_FILE" | tail -1)"
-PORT="${PORT:-8092}"
+# Resolve the port exactly the way the LaunchAgent does (set -a + source),
+# so export/quoted forms all parse correctly.
+PORT="$(set -a; . "$ENV_FILE" >/dev/null 2>&1; set +a; printf '%s' "${CKP_SERVER_PORT:-8092}")"
 echo "==> waiting for /health on 127.0.0.1:$PORT"
 for _ in $(seq 1 30); do
-  if curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
-    curl -s "http://127.0.0.1:$PORT/revision"
+  if curl -sf --connect-timeout 2 --max-time 5 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+    curl -s --connect-timeout 2 --max-time 5 "http://127.0.0.1:$PORT/revision"
     echo
     echo "==> update complete ($GUI_DOMAIN/$LABEL)"
     exit 0
@@ -40,5 +41,5 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 echo "!! gateway unhealthy after update; roll back with:" >&2
-echo "   git reset --hard $PREV && .venv/bin/pip install -q -e . && launchctl kickstart -k $GUI_DOMAIN/$LABEL" >&2
+echo "   git reset --hard $PREV && ./deploy/install-launchd.sh" >&2
 exit 1
