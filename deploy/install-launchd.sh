@@ -21,8 +21,9 @@ TEMPLATE="$REPO_DIR/deploy/$LABEL.plist.template"
 for p in "$REPO_DIR" "$LOG_DIR"; do
   [[ "$p" =~ ^[A-Za-z0-9/._-]+$ ]] || { echo "!! unsafe characters in path: $p" >&2; exit 1; }
 done
-# PORT lands in a sourced env file; only a plain port number is acceptable.
-[[ "$PORT" =~ ^[0-9]{1,5}$ ]] || { echo "!! PORT must be numeric: $PORT" >&2; exit 1; }
+# PORT lands in a sourced env file; require a real TCP port.
+[[ "$PORT" =~ ^[0-9]{1,5}$ ]] && (( PORT >= 1 && PORT <= 65535 )) \
+  || { echo "!! PORT must be a TCP port (1-65535): $PORT" >&2; exit 1; }
 
 mkdir -p "$LOG_DIR" "$HOME/Library/LaunchAgents" "$(dirname "$ENV_FILE")"
 
@@ -69,8 +70,18 @@ launchctl bootstrap "$GUI_DOMAIN" "$PLIST_PATH"
 launchctl kickstart -k "$GUI_DOMAIN/$LABEL"
 
 # The env file owns the real port; resolve it exactly the way the LaunchAgent
-# does (set -a + source), so export/quoted forms all parse correctly.
-HEALTH_PORT="$(set -a; . "$ENV_FILE" >/dev/null 2>&1; set +a; printf '%s' "${CKP_SERVER_PORT:-$PORT}")"
+# does (set -a + source). This deployment requires the port to come from
+# CKP_SERVER_PORT in the env file — a missing value or a CKP_CONFIG_FILE
+# override would make the probe and the service disagree, so fail loudly.
+HEALTH_PORT="$(set -a; . "$ENV_FILE" >/dev/null 2>&1; set +a;
+  [[ -n "${CKP_CONFIG_FILE:-}" ]] && { echo config-file; exit 0; }
+  printf '%s' "${CKP_SERVER_PORT:-}")"
+if [[ "$HEALTH_PORT" == "config-file" ]]; then
+  echo "!! CKP_CONFIG_FILE overrides are not supported by this deployment; keep [server].port in $ENV_FILE as CKP_SERVER_PORT" >&2
+  exit 1
+fi
+[[ "$HEALTH_PORT" =~ ^[0-9]{1,5}$ ]] && (( HEALTH_PORT >= 1 && HEALTH_PORT <= 65535 )) \
+  || { echo "!! $ENV_FILE must define CKP_SERVER_PORT (1-65535); got: ${HEALTH_PORT:-<empty>}" >&2; exit 1; }
 echo "==> waiting for /health on 127.0.0.1:$HEALTH_PORT"
 for _ in $(seq 1 30); do
   if curl -sf --connect-timeout 2 --max-time 5 "http://127.0.0.1:$HEALTH_PORT/health" >/dev/null 2>&1; then

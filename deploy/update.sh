@@ -22,7 +22,9 @@ git pull --ff-only origin main
 echo "==> $PREV -> $(git rev-parse HEAD)"
 
 if ./deploy/install-launchd.sh; then
-  PORT="$(set -a; . "$HOME/.config/cyclone/ckp-gateway.env" >/dev/null 2>&1; set +a; printf '%s' "${CKP_SERVER_PORT:-8092}")"
+  PORT="$(set -a; . "$HOME/.config/cyclone/ckp-gateway.env" >/dev/null 2>&1; set +a; printf '%s' "${CKP_SERVER_PORT:-}")"
+  [[ "$PORT" =~ ^[0-9]{1,5}$ ]] && (( PORT >= 1 && PORT <= 65535 )) \
+    || { echo "!! env file must define CKP_SERVER_PORT (1-65535)" >&2; exit 1; }
   curl -s --connect-timeout 2 --max-time 5 "http://127.0.0.1:$PORT/revision"
   echo
   echo "==> update complete"
