@@ -5,6 +5,37 @@ Phase 3 of `cyclone-tw/cyclone-wiki#142`.
 
 **Agents: read [`AGENTS.md`](AGENTS.md) first.**
 
+## Current status (2026-10-15)
+
+**Not running anywhere, and no longer being deployed.** No Mac mini process,
+LaunchAgent or checkout exists, and Cyclone-Dashboard still reads its local
+`export`. The last code change is `bc7dfe0` (2026-08-17). The Gateway cutover
+(#78) and the Writer action contract (#79) are closed as not planned.
+
+The repo's role is now **reference material for Wiki Seeker's retrieval
+evaluation** (`cyclone-tw/cyclone-wiki-seeker#54`). Seeker took the method
+and the scoring idea, reimplemented them in Rust, and measures them against
+its own verified question set. No Python from here runs in production.
+
+| Here | What Seeker took | Seeker counterpart |
+| --- | --- | --- |
+| `benchmarks/questions.py` | path-level answer keys, hand-checked real questions, synthetic vs real provenance | `evals/retrieval-baseline-v1.json` (33 cases, seven categories, SHA-256 per answer) |
+| `benchmarks/shadow.py`, `benchmarks/gate.py` | same questions against each engine, thresholds written before the run | `eval-retrieval` CLI, plus a decision rule written into the issue before scoring |
+| `benchmarks/token_cost.py` | context-size proxy | not ported |
+| `src/ckp/gateway/service.py` (`_K1`, `_FIELD_WEIGHTS`, relevance cutoff) | BM25F field weights 4/2/2/1, k1 = 3 saturation, length normalization, two-stage cutoff | `src/ranking.rs`, behind `[wiki.ranking] lexical = "bm25f"`; off by default |
+
+Differences worth knowing before reusing anything here:
+
+- The Gateway scorer splits on whitespace only. Unspaced Chinese becomes one
+  token, so it rarely matches. Seeker added a CJK bigram switch for this.
+- A hit here means "every expected path was returned". Seeker reports
+  hit@1/3/k, recall@k and MRR per question and per category.
+- The real question set here has six questions taken from filenames and
+  H1s, not natural questions.
+
+The sections below describe the platform as it was built. Keep them as
+history; they are not instructions for a live system.
+
 ## What this is
 
 A portable, self-hosted knowledge service over the Cyclone-Wiki bundle:
@@ -22,7 +53,7 @@ private editable copy of the other's contract.
 - Not the Dashboard. UI components stay in `Cyclone-Dashboard`.
 - Not a Hermes/OpenAB deployment target. Those integrate in Phase 7.
 
-## Status
+## Status as built
 
 Phase 3, through C8: Catalog and Gateway read, auth scope and context packing,
 the Writer contract over synthetic Git fixtures with a local-only Cyclone-Wiki
@@ -53,9 +84,12 @@ Container, including the endpoint smoke test:
 bash scripts/smoke-container.sh
 ```
 
-## Mac mini runtime (issue #78)
+## Mac mini runtime (issue #78, retired)
 
-A persistent Gateway on the Mac mini runs as a login-session LaunchAgent,
+Retired: the LaunchAgent no longer exists on the Mac mini (checked
+2026-10-13). The scripts stay for reference only.
+
+A persistent Gateway on the Mac mini ran as a login-session LaunchAgent,
 following the Cyclone-Dashboard deploy pattern:
 
 ```bash
@@ -171,3 +205,4 @@ tests/            pytest suite
 | `cyclone-tw/cyclone-wiki` | Cyclone Profile, metadata, taxonomy, validator, migration |
 | `cyclone-tw/Cyclone-Dashboard` | Gateway client, Catalog UI, review controls |
 | `cyclone-tw/cyclone-agent-config` | Coding agent rules, skills, review tooling |
+| `cyclone-tw/cyclone-wiki-seeker` | Live Wiki question answering; ported this repo's evaluation method and lexical scorer |
