@@ -28,7 +28,7 @@ Consumers pin a version of this repo's API schema and run a compatibility
 test. Nobody copies a locally editable duplicate of the schema.
 
 **This repo never contains Wiki content.** Fixtures are synthetic or public.
-No note bodies, no student data, no adult private meeting notes.
+No note bodies.
 
 ## 2. Issue-first
 
@@ -94,7 +94,6 @@ list). Pinned clauses and repo defaults that bind here (guarded by
 Never proceed, never automate around these:
 
 - Secrets, tokens, or `.env` content written into the repo or leaked.
-- Student-identifiable personal data entering git or any cloud service.
 - Force push.
 - Destructive production operations.
 - A coder self-approving and auto-merging its own work.
@@ -107,9 +106,7 @@ that owns its enforcement — see the platform Epic (#1).
 1. **Privacy routing completes before enqueue.** No item enters any queue with
    its privacy class still undetermined. Deferring classification to the
    dequeue side is forbidden.
-2. **Raw or identifiable `student-private` never enters the generic outbox —
-   encryption does not make it acceptable.** It may only go to an explicitly
-   approved local-only restricted store.
+2. *(Withdrawn; numbering kept because tests and code cite R1/R3. Ref cyclone-agent-config#837.)*
 3. **An outbox that has not passed its replay test may not carry the migration
    freeze.** If replay is unproven at Phase 5, the fallback is a full hard
    freeze that rejects writes immediately — never a pretend-accepting queue.

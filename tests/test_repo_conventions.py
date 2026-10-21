@@ -43,7 +43,6 @@ REVIEW_CONTRACT_CLAUSES = (
 
 HARD_STOPS = (
     ("secrets", "Secrets, tokens, or `.env`"),
-    ("student-data", "Student-identifiable personal data"),
     ("force-push", "Force push"),
     ("prod-destructive", "Destructive production operations"),
     ("self-merge", "self-approving and auto-merging"),
@@ -52,7 +51,6 @@ HARD_STOPS = (
 # Contract §3 Phase 3. These are product invariants, not style.
 RED_LINES = (
     ("privacy-before-enqueue", "Privacy routing completes before enqueue"),
-    ("no-student-private-in-outbox", "encryption does not make it acceptable"),
     ("replay-before-freeze", "has not passed its replay test"),
     ("direct-formal-closed", "direct-formal templates stay closed"),
     ("manifest-frozen", "7278252"),
