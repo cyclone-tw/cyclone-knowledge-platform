@@ -97,6 +97,10 @@ Never proceed, never automate around these:
 - Force push.
 - Destructive production operations.
 - A coder self-approving and auto-merging its own work.
+- Personal data sent to a mainland-China cloud LLM (e.g. DeepSeek, Qwen, Kimi,
+  Zhipu GLM, MiniMax, Doubao, ERNIE, Baichuan). Local models are fine. This is
+  the only data rule; student data otherwise has no privacy or cloud
+  restriction (cyclone-agent-config#837).
 
 ## 6. Phase 3 red lines (contract §3, verbatim intent)
 
