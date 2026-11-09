@@ -46,6 +46,7 @@ HARD_STOPS = (
     ("force-push", "Force push"),
     ("prod-destructive", "Destructive production operations"),
     ("self-merge", "self-approving and auto-merging"),
+    ("china-cloud-llm", "Personal data sent to a mainland-China cloud LLM"),
 )
 
 # Contract §3 Phase 3. These are product invariants, not style.
